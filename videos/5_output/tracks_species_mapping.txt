@@ -1,0 +1,3 @@
+Compact Annotation Species Mapping:
+1: Aptenodytes_patagonicus
+2: Aptenodytes_forsteri

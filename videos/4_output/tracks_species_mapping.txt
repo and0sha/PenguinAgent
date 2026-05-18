@@ -1,0 +1,7 @@
+Compact Annotation Species Mapping:
+1: Pygoscelis_papua
+2: Eudyptes_chrysolophus
+3: Eudyptes_chrysocome
+4: Eudyptes_robustus
+5: Eudyptes_schlegeli
+6: Eudyptula_minor

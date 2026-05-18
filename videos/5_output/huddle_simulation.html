@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Penguin Huddle Dynamics Simulator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #0f172a; color: #f8fafc; overflow: hidden; margin: 0; padding: 0;}
+        canvas { display: block; width: 100%; height: 100%; }
+        .glass-panel {
+            background: rgba(30, 41, 59, 0.8);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        /* Custom range slider styling */
+        input[type=range] {
+            -webkit-appearance: none;
+            width: 100%;
+            background: transparent;
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 16px;
+            width: 16px;
+            border-radius: 50%;
+            background: #3b82f6;
+            cursor: pointer;
+            margin-top: -6px;
+            box-shadow: 0 0 10px rgba(59, 130, 246, 0.5);
+        }
+        input[type=range]::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 4px;
+            cursor: pointer;
+            background: #475569;
+            border-radius: 2px;
+        }
+    </style>
+</head>
+<body class="flex h-screen w-screen bg-slate-900 overflow-hidden">
+
+    <div class="w-80 h-full glass-panel p-6 flex flex-col z-50 shadow-2xl overflow-y-auto flex-shrink-0 relative">
+        <h1 class="text-2xl font-bold mb-2 text-blue-400">Huddle Dynamics</h1>
+        <p class="text-xs text-slate-400 mb-6 border-b border-slate-700 pb-4">Thermodynamic & Geometric Simulation</p>
+
+        <!-- Metrics Display -->
+        <div class="mb-6 space-y-3">
+            <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">Live Metrics</h2>
+            
+            <div class="bg-slate-800/50 p-3 rounded-lg border border-slate-700 mb-3 text-xs text-slate-400 font-mono">
+                <strong>Env:</strong> <span id="env-data">
+User-Provided Environmental Boundary Conditions:
+- Péclet number ($Pe$): 100.0 (Wind strength)
+- Noise level ($\beta$): 0.25 (Random perturbation)
+- Temperature at huddle boundary ($T_p$): -10.0 °C
+- Ambient temperature away from huddle ($T_\infty$): -40.0 °C
+</span>
+            </div>
+
+            <div class="bg-slate-800/50 p-3 rounded-lg border border-slate-700">
+                <div class="flex justify-between text-sm mb-1">
+                    <span class="text-slate-400">Peclet Number (Pe)</span>
+                    <span id="metric-peclet" class="font-mono font-bold text-orange-400">0.00</span>
+                </div>
+                <div class="text-[10px] text-slate-500">Convective vs Conductive heat transfer</div>
+            </div>
+
+            <div class="bg-slate-800/50 p-3 rounded-lg border border-slate-700">
+                <div class="flex justify-between text-sm mb-1">
+                    <span class="text-slate-400">Aspect Ratio</span>
+                    <span id="metric-aspect" class="font-mono font-bold text-blue-300">1.00</span>
+                </div>
+            </div>
+
+            <div class="bg-slate-800/50 p-3 rounded-lg border border-slate-700">
+                <div class="flex justify-between text-sm mb-1">
+                    <span class="text-slate-400">Core Density</span>
+                    <span id="metric-density" class="font-mono font-bold text-emerald-400">0.00</span>
+                </div>
+            </div>
+            
+            <div class="bg-slate-800/50 p-3 rounded-lg border border-slate-700 flex items-center justify-between">
+                <div class="text-sm text-slate-400">Mover Speed (Max)</div>
+                <span id="metric-mover" class="font-mono font-bold text-purple-400">0.00</span>
+            </div>
+        </div>
+
+        <div class="space-y-5">
+            <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">Controls</h2>
+            
+            <div>
+                <div class="flex justify-between text-xs mb-1">
+                    <label class="text-slate-400">Wind Intensity</label>
+                    <span id="val-wind" class="font-mono text-slate-300">50%</span>
+                </div>
+                <input type="range" id="ctrl-wind" min="0" max="100" value="50">
+            </div>
+
+            <div>
+                <div class="flex justify-between text-xs mb-1">
+                    <label class="text-slate-400">Wind Angle</label>
+                    <span id="val-angle" class="font-mono text-slate-300">180°</span>
+                </div>
+                <input type="range" id="ctrl-angle" min="0" max="360" value="180">
+            </div>
+
+            <div>
+                <div class="flex justify-between text-xs mb-1">
+                    <label class="text-slate-400">Noise / Restlessness (β)</label>
+                    <span id="val-noise" class="font-mono text-slate-300">20%</span>
+                </div>
+                <input type="range" id="ctrl-noise" min="0" max="100" value="20">
+            </div>
+
+            <div>
+                <div class="flex justify-between text-xs mb-1">
+                    <label class="text-slate-400">Population</label>
+                    <span id="val-pop" class="font-mono text-slate-300">150</span>
+                </div>
+                <input type="range" id="ctrl-pop" min="20" max="300" value="150">
+            </div>
+        </div>
+        
+        <div class="mt-auto pt-6">
+             <div class="flex items-center gap-2 text-xs text-slate-400">
+                <div class="w-3 h-3 rounded-full bg-slate-200"></div> Core
+             </div>
+             <div class="flex items-center gap-2 text-xs text-slate-400 mt-1">
+                <div class="w-3 h-3 rounded-full bg-purple-500"></div> Boundary
+             </div>
+             <div class="flex items-center gap-2 text-xs text-slate-400 mt-1">
+                <div class="w-3 h-3 rounded-full bg-yellow-400 shadow-[0_0_8px_rgba(250,204,21,0.8)]"></div> Active Mover
+             </div>
+        </div>
+    </div>
+
+    <!-- Canvas Container -->
+    <div class="flex-1 relative w-full h-full bg-slate-900">
+        <!-- Grid Background overlay -->
+        <div class="absolute inset-0 z-0 opacity-20 pointer-events-none" style="background-image: radial-gradient(#3b82f6 1px, transparent 1px); background-size: 40px 40px;"></div>
+        <canvas id="simCanvas" class="z-10 relative"></canvas>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('simCanvas');
+        const ctx = canvas.getContext('2d');
+        
+        let width, height;
+        let penguins = [];
+        let hullPoints = [];
+        let coreIndices = new Set();
+        let activeMoverIndex = -1;
+
+        const reportTracks = {"Aptenodytes_patagonicus_1": [{"second": 0, "x": 562, "y": 356, "area": 3330.0, "vx": 0.0, "vy": 0.0}, {"second": 1, "x": 563, "y": 356, "area": 3400.0, "vx": 1.0, "vy": 0.0}, {"second": 2, "x": 562, "y": 359, "area": 3493.0, "vx": -1.0, "vy": 3.0}, {"second": 3, "x": 562, "y": 361, "area": 3341.0, "vx": 0.0, "vy": 2.0}, {"second": 4, "x": 564, "y": 366, "area": 3879.0, "vx": 2.0, "vy": 5.0}, {"second": 5, "x": 565, "y": 372, "area": 4243.0, "vx": 1.0, "vy": 6.0}, {"second": 6, "x": 572, "y": 380, "area": 5464.0, "vx": 7.0, "vy": 8.0}, {"second": 7, "x": 578, "y": 378, "area": 5159.0, "vx": 6.0, "vy": -2.0}, {"second": 8, "x": 579, "y": 365, "area": 3336.0, "vx": 1.0, "vy": -13.0}, {"second": 9, "x": 580, "y": 361, "area": 2263.0, "vx": 1.0, "vy": -4.0}], "Aptenodytes_patagonicus_2": [{"second": 0, "x": 402, "y": 399, "area": 3904.0, "vx": 0.0, "vy": 0.0}, {"second": 1, "x": 402, "y": 402, "area": 4173.0, "vx": 0.0, "vy": 3.0}, {"second": 2, "x": 404, "y": 389, "area": 3012.0, "vx": 2.0, "vy": -13.0}, {"second": 3, "x": 404, "y": 370, "area": 2404.0, "vx": 0.0, "vy": -19.0}, {"second": 4, "x": 403, "y": 349, "area": 2158.0, "vx": -1.0, "vy": -21.0}, {"second": 5, "x": 403, "y": 343, "area": 2008.0, "vx": 0.0, "vy": -6.0}, {"second": 6, "x": 401, "y": 345, "area": 1862.0, "vx": -2.0, "vy": 2.0}, {"second": 7, "x": 405, "y": 346, "area": 1855.0, "vx": 4.0, "vy": 1.0}, {"second": 8, "x": 410, "y": 351, "area": 1963.0, "vx": 5.0, "vy": 5.0}, {"second": 9, "x": 414, "y": 349, "area": 1834.0, "vx": 4.0, "vy": -2.0}], "Aptenodytes_forsteri_1": [{"second": 0, "x": 460, "y": 502, "area": 21527.0, "vx": 0.0, "vy": 0.0}, {"second": 1, "x": 460, "y": 502, "area": 21424.0, "vx": 0.0, "vy": 0.0}, {"second": 2, "x": 466, "y": 504, "area": 22025.0, "vx": 6.0, "vy": 2.0}, {"second": 3, "x": 476, "y": 506, "area": 22219.0, "vx": 10.0, "vy": 2.0}, {"second": 4, "x": 483, "y": 508, "area": 22429.0, "vx": 7.0, "vy": 2.0}, {"second": 5, "x": 492, "y": 512, "area": 22435.0, "vx": 9.0, "vy": 4.0}, {"second": 6, "x": 502, "y": 516, "area": 22932.0, "vx": 10.0, "vy": 4.0}, {"second": 7, "x": 512, "y": 519, "area": 22191.0, "vx": 10.0, "vy": 3.0}, {"second": 8, "x": 524, "y": 520, "area": 22843.0, "vx": 12.0, "vy": 1.0}, {"second": 9, "x": 534, "y": 520, "area": 23289.0, "vx": 10.0, "vy": 0.0}], "Aptenodytes_patagonicus_3": [{"second": 0, "x": 526, "y": 463, "area": 3586.0, "vx": 0.0, "vy": 0.0}, {"second": 1, "x": 526, "y": 463, "area": 3626.0, "vx": 0.0, "vy": 0.0}, {"second": 2, "x": 536, "y": 460, "area": 3757.0, "vx": 10.0, "vy": -3.0}, {"second": 3, "x": 541, "y": 466, "area": 3310.0, "vx": 5.0, "vy": 6.0}, {"second": 4, "x": 549, "y": 458, "area": 3124.0, "vx": 8.0, "vy": -8.0}, {"second": 5, "x": 556, "y": 465, "area": 3114.0, "vx": 7.0, "vy": 7.0}, {"second": 6, "x": 567, "y": 474, "area": 2677.0, "vx": 11.0, "vy": 9.0}, {"second": 7, "x": 578, "y": 461, "area": 2709.0, "vx": 11.0, "vy": -13.0}, {"second": 8, "x": 594, "y": 438, "area": 4574.0, "vx": 16.0, "vy": -23.0}, {"second": 9, "x": 601, "y": 433, "area": 5417.0, "vx": 7.0, "vy": -5.0}], "Aptenodytes_patagonicus_4": [{"second": 0, "x": 865, "y": 473, "area": 18937.0, "vx": 0.0, "vy": 0.0}, {"second": 1, "x": 866, "y": 473, "area": 18996.0, "vx": 1.0, "vy": 0.0}, {"second": 2, "x": 872, "y": 475, "area": 19236.0, "vx": 6.0, "vy": 2.0}, {"second": 3, "x": 877, "y": 477, "area": 18725.0, "vx": 5.0, "vy": 2.0}, {"second": 4, "x": 884, "y": 478, "area": 18532.0, "vx": 7.0, "vy": 1.0}, {"second": 5, "x": 892, "y": 479, "area": 18336.0, "vx": 8.0, "vy": 1.0}, {"second": 6, "x": 903, "y": 481, "area": 18566.0, "vx": 11.0, "vy": 2.0}, {"second": 7, "x": 912, "y": 480, "area": 18290.0, "vx": 9.0, "vy": -1.0}, {"second": 8, "x": 921, "y": 482, "area": 17677.0, "vx": 9.0, "vy": 2.0}, {"second": 9, "x": 928, "y": 481, "area": 17138.0, "vx": 7.0, "vy": -1.0}], "Aptenodytes_patagonicus_5": [{"second": 0, "x": 809, "y": 398, "area": 1153.0, "vx": 0.0, "vy": 0.0}, {"second": 1, "x": 809, "y": 398, "area": 1098.0, "vx": 0.0, "vy": 0.0}, {"second": 2, "x": 815, "y": 395, "area": 1076.0, "vx": 6.0, "vy": -3.0}, {"second": 3, "x": 819, "y": 402, "area": 350.0, "vx": 4.0, "vy": 7.0}, {"second": 4, "x": 821, "y": 393, "area": 914.0, "vx": 2.0, "vy": -9.0}, {"second": 5, "x": 833, "y": 396, "area": 854.0, "vx": 12.0, "vy": 3.0}, {"second": 6, "x": 847, "y": 401, "area": 413.0, "vx": 14.0, "vy": 5.0}, {"second": 7, "x": 855, "y": 410, "area": 235.0, "vx": 8.0, "vy": 9.0}, {"second": 8, "x": 860, "y": 402, "area": 39.0, "vx": 5.0, "vy": -8.0}, {"second": 9, "x": 866, "y": 394, "area": 520.0, "vx": 6.0, "vy": -8.0}], "Aptenodytes_patagonicus_6": [{"second": 0, "x": 197, "y": 409, "area": 5522.0, "vx": 0.0, "vy": 0.0}, {"second": 1, "x": 198, "y": 409, "area": 5690.0, "vx": 1.0, "vy": 0.0}, {"second": 2, "x": 201, "y": 409, "area": 5912.0, "vx": 3.0, "vy": 0.0}, {"second": 3, "x": 201, "y": 421, "area": 6388.0, "vx": 0.0, "vy": 12.0}, {"second": 4, "x": 201, "y": 427, "area": 7412.0, "vx": 0.0, "vy": 6.0}, {"second": 5, "x": 202, "y": 437, "area": 7042.0, "vx": 1.0, "vy": 10.0}, {"second": 6, "x": 207, "y": 444, "area": 7437.0, "vx": 5.0, "vy": 7.0}, {"second": 7, "x": 212, "y": 448, "area": 7793.0, "vx": 5.0, "vy": 4.0}, {"second": 8, "x": 220, "y": 447, "area": 8522.0, "vx": 8.0, "vy": -1.0}, {"second": 9, "x": 225, "y": 446, "area": 9423.0, "vx": 5.0, "vy": -1.0}], "Aptenodytes_patagonicus_7": [{"second": 0, "x": 930, "y": 451, "area": 12190.0, "vx": 0.0, "vy": 0.0}, {"second": 1, "x": 930, "y": 451, "area": 12386.0, "vx": 0.0, "vy": 0.0}, {"second": 2, "x": 935, "y": 451, "area": 12002.0, "vx": 5.0, "vy": 0.0}, {"second": 3, "x": 939, "y": 449, "area": 11944.0, "vx": 4.0, "vy": -2.0}, {"second": 4, "x": 943, "y": 449, "area": 11565.0, "vx": 4.0, "vy": 0.0}, {"second": 5, "x": 949, "y": 449, "area": 11128.0, "vx": 6.0, "vy": 0.0}, {"second": 6, "x": 958, "y": 454, "area": 10351.0, "vx": 9.0, "vy": 5.0}, {"second": 7, "x": 964, "y": 451, "area": 9911.0, "vx": 6.0, "vy": -3.0}, {"second": 8, "x": 971, "y": 450, "area": 10010.0, "vx": 7.0, "vy": -1.0}, {"second": 9, "x": 978, "y": 453, "area": 9213.0, "vx": 7.0, "vy": 3.0}], "Aptenodytes_patagonicus_8": [{"second": 0, "x": 342, "y": 483, "area": 19895.0, "vx": 0.0, "vy": 0.0}, {"second": 1, "x": 342, "y": 483, "area": 19770.0, "vx": 0.0, "vy": 0.0}, {"second": 2, "x": 349, "y": 486, "area": 20146.0, "vx": 7.0, "vy": 3.0}, {"second": 3, "x": 355, "y": 488, "area": 20456.0, "vx": 6.0, "vy": 2.0}, {"second": 4, "x": 360, "y": 491, "area": 20811.0, "vx": 5.0, "vy": 3.0}, {"second": 5, "x": 368, "y": 493, "area": 21163.0, "vx": 8.0, "vy": 2.0}, {"second": 6, "x": 377, "y": 495, "area": 21178.0, "vx": 9.0, "vy": 2.0}, {"second": 7, "x": 385, "y": 496, "area": 21254.0, "vx": 8.0, "vy": 1.0}, {"second": 8, "x": 396, "y": 499, "area": 21288.0, "vx": 11.0, "vy": 3.0}, {"second": 9, "x": 403, "y": 499, "area": 22045.0, "vx": 7.0, "vy": 0.0}], "Aptenodytes_forsteri_2": [{"second": 0, "x": 244, "y": 458, "area": 20187.0, "vx": 0.0, "vy": 0.0}, {"second": 1, "x": 244, "y": 459, "area": 19919.0, "vx": 0.0, "vy": 1.0}, {"second": 2, "x": 249, "y": 460, "area": 20529.0, "vx": 5.0, "vy": 1.0}, {"second": 3, "x": 252, "y": 461, "area": 20516.0, "vx": 3.0, "vy": 1.0}, {"second": 4, "x": 255, "y": 464, "area": 20836.0, "vx": 3.0, "vy": 3.0}, {"second": 5, "x": 258, "y": 465, "area": 21142.0, "vx": 3.0, "vy": 1.0}, {"second": 6, "x": 265, "y": 467, "area": 21007.0, "vx": 7.0, "vy": 2.0}, {"second": 7, "x": 272, "y": 470, "area": 21038.0, "vx": 7.0, "vy": 3.0}, {"second": 8, "x": 282, "y": 473, "area": 21513.0, "vx": 10.0, "vy": 3.0}, {"second": 9, "x": 286, "y": 476, "area": 21343.0, "vx": 4.0, "vy": 3.0}], "Aptenodytes_patagonicus_9": [{"second": 0, "x": 629, "y": 368, "area": 3735.0, "vx": 0.0, "vy": 0.0}, {"second": 1, "x": 629, "y": 369, "area": 3840.0, "vx": 0.0, "vy": 1.0}, {"second": 2, "x": 631, "y": 367, "area": 3697.0, "vx": 2.0, "vy": -2.0}, {"second": 3, "x": 634, "y": 369, "area": 4437.0, "vx": 3.0, "vy": 2.0}, {"second": 4, "x": 639, "y": 372, "area": 4113.0, "vx": 5.0, "vy": 3.0}, {"second": 5, "x": 649, "y": 379, "area": 4245.0, "vx": 10.0, "vy": 7.0}, {"second": 6, "x": 656, "y": 379, "area": 4282.0, "vx": 7.0, "vy": 0.0}, {"second": 7, "x": 662, "y": 380, "area": 3870.0, "vx": 6.0, "vy": 1.0}, {"second": 8, "x": 667, "y": 375, "area": 3214.0, "vx": 5.0, "vy": -5.0}, {"second": 9, "x": 670, "y": 376, "area": 3069.0, "vx": 3.0, "vy": 1.0}], "Aptenodytes_patagonicus_10": [{"second": 0, "x": 433, "y": 407, "area": 3542.0, "vx": 0.0, "vy": 0.0}, {"second": 1, "x": 435, "y": 407, "area": 3578.0, "vx": 2.0, "vy": 0.0}, {"second": 2, "x": 434, "y": 415, "area": 4252.0, "vx": -1.0, "vy": 8.0}, {"second": 3, "x": 436, "y": 418, "area": 6002.0, "vx": 2.0, "vy": 3.0}, {"second": 4, "x": 439, "y": 423, "area": 6028.0, "vx": 3.0, "vy": 5.0}, {"second": 5, "x": 443, "y": 429, "area": 6189.0, "vx": 4.0, "vy": 6.0}, {"second": 6, "x": 451, "y": 430, "area": 6160.0, "vx": 8.0, "vy": 1.0}, {"second": 7, "x": 463, "y": 440, "area": 6695.0, "vx": 12.0, "vy": 10.0}, {"second": 8, "x": 478, "y": 399, "area": 2214.0, "vx": 15.0, "vy": -41.0}, {"second": 9, "x": 479, "y": 412, "area": 2321.0, "vx": 1.0, "vy": 13.0}], "Aptenodytes_patagonicus_11": [{"second": 0, "x": 336, "y": 358, "area": 2274.0, "vx": 0.0, "vy": 0.0}, {"second": 1, "x": 337, "y": 358, "area": 2229.0, "vx": 1.0, "vy": 0.0}, {"second": 2, "x": 340, "y": 369, "area": 1499.0, "vx": 3.0, "vy": 11.0}, {"second": 3, "x": 341, "y": 360, "area": 1831.0, "vx": 1.0, "vy": -9.0}, {"second": 4, "x": 344, "y": 364, "area": 2463.0, "vx": 3.0, "vy": 4.0}, {"second": 5, "x": 347, "y": 358, "area": 2554.0, "vx": 3.0, "vy": -6.0}, {"second": 6, "x": 346, "y": 379, "area": 2764.0, "vx": -1.0, "vy": 21.0}, {"second": 7, "x": 350, "y": 386, "area": 3028.0, "vx": 4.0, "vy": 7.0}, {"second": 8, "x": 360, "y": 386, "area": 2924.0, "vx": 10.0, "vy": 0.0}, {"second": 9, "x": 365, "y": 395, "area": 3140.0, "vx": 5.0, "vy": 9.0}], "Aptenodytes_patagonicus_12": [{"second": 0, "x": 303, "y": 384, "area": 1442.0, "vx": 0.0, "vy": 0.0}, {"second": 1, "x": 302, "y": 383, "area": 1498.0, "vx": -1.0, "vy": -1.0}, {"second": 2, "x": 309, "y": 384, "area": 1789.0, "vx": 7.0, "vy": 1.0}, {"second": 3, "x": 310, "y": 417, "area": 3387.0, "vx": 1.0, "vy": 33.0}, {"second": 4, "x": 316, "y": 389, "area": 2174.0, "vx": 6.0, "vy": -28.0}, {"second": 5, "x": 318, "y": 448, "area": 3401.0, "vx": 2.0, "vy": 59.0}, {"second": 6, "x": 321, "y": 479, "area": 2741.0, "vx": 3.0, "vy": 31.0}, {"second": 7, "x": 327, "y": 493, "area": 2394.0, "vx": 6.0, "vy": 14.0}, {"second": 8, "x": 344, "y": 439, "area": 1067.0, "vx": 17.0, "vy": -54.0}, {"second": 9, "x": 349, "y": 444, "area": 977.0, "vx": 5.0, "vy": 5.0}], "Aptenodytes_patagonicus_13": [{"second": 0, "x": 689, "y": 357, "area": 2179.0, "vx": 0.0, "vy": 0.0}, {"second": 1, "x": 690, "y": 359, "area": 2319.0, "vx": 1.0, "vy": 2.0}, {"second": 2, "x": 694, "y": 358, "area": 2615.0, "vx": 4.0, "vy": -1.0}, {"second": 3, "x": 701, "y": 348, "area": 1955.0, "vx": 7.0, "vy": -10.0}, {"second": 4, "x": 698, "y": 344, "area": 2004.0, "vx": -3.0, "vy": -4.0}, {"second": 5, "x": 713, "y": 364, "area": 2904.0, "vx": 15.0, "vy": 20.0}, {"second": 6, "x": 730, "y": 381, "area": 2471.0, "vx": 17.0, "vy": 17.0}, {"second": 7, "x": 733, "y": 384, "area": 3133.0, "vx": 3.0, "vy": 3.0}, {"second": 8, "x": 734, "y": 378, "area": 3086.0, "vx": 1.0, "vy": -6.0}, {"second": 9, "x": 731, "y": 373, "area": 2406.0, "vx": -3.0, "vy": -5.0}], "Aptenodytes_patagonicus_14": [{"second": 0, "x": 501, "y": 348, "area": 2406.0, "vx": 0.0, "vy": 0.0}, {"second": 1, "x": 500, "y": 347, "area": 2335.0, "vx": -1.0, "vy": -1.0}, {"second": 2, "x": 500, "y": 350, "area": 2552.0, "vx": 0.0, "vy": 3.0}, {"second": 3, "x": 493, "y": 350, "area": 1966.0, "vx": -7.0, "vy": 0.0}, {"second": 4, "x": 491, "y": 355, "area": 2046.0, "vx": -2.0, "vy": 5.0}, {"second": 5, "x": 488, "y": 366, "area": 2223.0, "vx": -3.0, "vy": 11.0}, {"second": 6, "x": 481, "y": 400, "area": 1000.0, "vx": -7.0, "vy": 34.0}, {"second": 8, "x": 469, "y": 466, "area": 3914.0, "vx": 0.0, "vy": 0.0}, {"second": 9, "x": 476, "y": 469, "area": 4483.0, "vx": 7.0, "vy": 3.0}], "Aptenodytes_forsteri_3": [{"second": 0, "x": 775, "y": 498, "area": 20280.0, "vx": 0.0, "vy": 0.0}, {"second": 1, "x": 775, "y": 497, "area": 20545.0, "vx": 0.0, "vy": -1.0}, {"second": 2, "x": 782, "y": 498, "area": 20870.0, "vx": 7.0, "vy": 1.0}, {"second": 3, "x": 791, "y": 495, "area": 21150.0, "vx": 9.0, "vy": -3.0}, {"second": 4, "x": 799, "y": 499, "area": 20567.0, "vx": 8.0, "vy": 4.0}, {"second": 5, "x": 807, "y": 497, "area": 21145.0, "vx": 8.0, "vy": -2.0}, {"second": 6, "x": 818, "y": 498, "area": 21312.0, "vx": 11.0, "vy": 1.0}, {"second": 7, "x": 829, "y": 502, "area": 20469.0, "vx": 11.0, "vy": 4.0}, {"second": 8, "x": 841, "y": 504, "area": 20265.0, "vx": 12.0, "vy": 2.0}, {"second": 9, "x": 848, "y": 505, "area": 20809.0, "vx": 7.0, "vy": 1.0}], "Aptenodytes_forsteri_4": [{"second": 0, "x": 674, "y": 501, "area": 18582.0, "vx": 0.0, "vy": 0.0}, {"second": 1, "x": 674, "y": 501, "area": 18856.0, "vx": 0.0, "vy": 0.0}, {"second": 2, "x": 681, "y": 500, "area": 19092.0, "vx": 7.0, "vy": -1.0}, {"second": 3, "x": 691, "y": 501, "area": 19043.0, "vx": 10.0, "vy": 1.0}, {"second": 4, "x": 700, "y": 503, "area": 18829.0, "vx": 9.0, "vy": 2.0}, {"second": 5, "x": 709, "y": 506, "area": 18607.0, "vx": 9.0, "vy": 3.0}, {"second": 6, "x": 720, "y": 509, "area": 18713.0, "vx": 11.0, "vy": 3.0}, {"second": 7, "x": 731, "y": 509, "area": 18791.0, "vx": 11.0, "vy": 0.0}, {"second": 8, "x": 741, "y": 510, "area": 18921.0, "vx": 10.0, "vy": 1.0}, {"second": 9, "x": 750, "y": 506, "area": 19264.0, "vx": 9.0, "vy": -4.0}], "Aptenodytes_forsteri_5": [{"second": 0, "x": 577, "y": 512, "area": 20339.0, "vx": 0.0, "vy": 0.0}, {"second": 1, "x": 577, "y": 512, "area": 20468.0, "vx": 0.0, "vy": 0.0}, {"second": 2, "x": 586, "y": 514, "area": 20753.0, "vx": 9.0, "vy": 2.0}, {"second": 3, "x": 593, "y": 514, "area": 21102.0, "vx": 7.0, "vy": 0.0}, {"second": 4, "x": 602, "y": 515, "area": 21417.0, "vx": 9.0, "vy": 1.0}, {"second": 5, "x": 612, "y": 515, "area": 22013.0, "vx": 10.0, "vy": 0.0}, {"second": 6, "x": 624, "y": 520, "area": 21358.0, "vx": 12.0, "vy": 5.0}, {"second": 7, "x": 634, "y": 521, "area": 21829.0, "vx": 10.0, "vy": 1.0}, {"second": 8, "x": 646, "y": 524, "area": 21603.0, "vx": 12.0, "vy": 3.0}, {"second": 9, "x": 656, "y": 525, "area": 21740.0, "vx": 10.0, "vy": 1.0}], "Aptenodytes_patagonicus_15": [{"second": 0, "x": 733, "y": 386, "area": 3654.0, "vx": 0.0, "vy": 0.0}, {"second": 1, "x": 734, "y": 386, "area": 3531.0, "vx": 1.0, "vy": 0.0}, {"second": 2, "x": 736, "y": 381, "area": 3059.0, "vx": 2.0, "vy": -5.0}, {"second": 3, "x": 737, "y": 382, "area": 2417.0, "vx": 1.0, "vy": 1.0}, {"second": 4, "x": 753, "y": 368, "area": 1967.0, "vx": 16.0, "vy": -14.0}, {"second": 5, "x": 752, "y": 421, "area": 25.0, "vx": -1.0, "vy": 53.0}, {"second": 6, "x": 847, "y": 417, "area": 5.0, "vx": 95.0, "vy": -4.0}, {"second": 7, "x": 807, "y": 388, "area": 257.0, "vx": -40.0, "vy": -29.0}, {"second": 8, "x": 805, "y": 399, "area": 106.0, "vx": -2.0, "vy": 11.0}, {"second": 9, "x": 800, "y": 437, "area": 867.0, "vx": -5.0, "vy": 38.0}], "Aptenodytes_patagonicus_16": [{"second": 2, "x": 730, "y": 453, "area": 342.0, "vx": 0.0, "vy": 0.0}, {"second": 3, "x": 740, "y": 438, "area": 859.0, "vx": 10.0, "vy": -15.0}, {"second": 4, "x": 747, "y": 442, "area": 919.0, "vx": 7.0, "vy": 4.0}, {"second": 5, "x": 755, "y": 417, "area": 1150.0, "vx": 8.0, "vy": -25.0}, {"second": 6, "x": 767, "y": 419, "area": 1655.0, "vx": 12.0, "vy": 2.0}, {"second": 7, "x": 793, "y": 400, "area": 1597.0, "vx": 26.0, "vy": -19.0}, {"second": 8, "x": 802, "y": 407, "area": 2624.0, "vx": 9.0, "vy": 7.0}, {"second": 9, "x": 813, "y": 366, "area": 1509.0, "vx": 11.0, "vy": -41.0}], "Aptenodytes_patagonicus_17": [{"second": 3, "x": 645, "y": 423, "area": 977.0, "vx": 0.0, "vy": 0.0}, {"second": 4, "x": 653, "y": 428, "area": 908.0, "vx": 8.0, "vy": 5.0}, {"second": 5, "x": 659, "y": 440, "area": 301.0, "vx": 6.0, "vy": 12.0}, {"second": 6, "x": 669, "y": 443, "area": 255.0, "vx": 10.0, "vy": 3.0}, {"second": 7, "x": 679, "y": 443, "area": 315.0, "vx": 10.0, "vy": 0.0}, {"second": 8, "x": 691, "y": 437, "area": 571.0, "vx": 12.0, "vy": -6.0}, {"second": 9, "x": 701, "y": 437, "area": 593.0, "vx": 10.0, "vy": 0.0}], "Aptenodytes_patagonicus_18": [{"second": 6, "x": 504, "y": 353, "area": 1315.0, "vx": 0.0, "vy": 0.0}, {"second": 7, "x": 506, "y": 353, "area": 1519.0, "vx": 2.0, "vy": 0.0}, {"second": 8, "x": 507, "y": 357, "area": 1796.0, "vx": 1.0, "vy": 4.0}, {"second": 9, "x": 508, "y": 361, "area": 2057.0, "vx": 1.0, "vy": 4.0}]};
+
+        // Simulation Parameters
+        let config = {
+            windIntensity: 0.5,
+            windAngle: Math.PI, // 180 degrees
+            noise: 0.2,
+            population: 150,
+            penguinRadius: 4,
+            cohesionRadius: 100,
+            separationRadius: 12,
+            maxSpeed: 2.5
+        };
+
+        function resizeCanvas() {
+            width = canvas.parentElement.clientWidth;
+            height = canvas.parentElement.clientHeight;
+            canvas.width = width;
+            canvas.height = height;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // 2D Vector operations
+        class Vec2 {
+            constructor(x, y) { this.x = x; this.y = y; }
+            add(v) { return new Vec2(this.x + v.x, this.y + v.y); }
+            sub(v) { return new Vec2(this.x - v.x, this.y - v.y); }
+            mult(n) { return new Vec2(this.x * n, this.y * n); }
+            div(n) { return new Vec2(this.x / n, this.y / n); }
+            mag() { return Math.sqrt(this.x * this.x + this.y * this.y); }
+            normalize() { const m = this.mag(); return m === 0 ? new Vec2(0,0) : this.div(m); }
+            limit(max) { return this.mag() > max ? this.normalize().mult(max) : this; }
+            dist(v) { return this.sub(v).mag(); }
+        }
+
+        // Monotone Chain algorithm for Convex Hull (Alternative to SciPy's ConvexHull)
+        function getConvexHull(points) {
+            if (points.length < 3) return points.map((_, i) => i);
+
+            // Create array of objects with original indices to track which penguin is which
+            let pts = points.map((p, i) => ({ x: p.x, y: p.y, idx: i }));
+            
+            // Sort by x, then y
+            pts.sort((a, b) => a.x === b.x ? a.y - b.y : a.x - b.x);
+
+            const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+
+            let lower = [];
+            for (let i = 0; i < pts.length; i++) {
+                while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], pts[i]) <= 0) {
+                    lower.pop();
+                }
+                lower.push(pts[i]);
+            }
+
+            let upper = [];
+            for (let i = pts.length - 1; i >= 0; i--) {
+                while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], pts[i]) <= 0) {
+                    upper.pop();
+                }
+                upper.push(pts[i]);
+            }
+
+            upper.pop(); lower.pop();
+            return lower.concat(upper).map(p => p.idx);
+        }
+
+        // Polygon area
+        function getPolygonArea(indices) {
+            let area = 0;
+            for (let i = 0; i < indices.length; i++) {
+                let j = (i + 1) % indices.length;
+                let p1 = penguins[indices[i]].pos;
+                let p2 = penguins[indices[j]].pos;
+                area += p1.x * p2.y - p2.x * p1.y;
+            }
+            return Math.abs(area / 2);
+        }
+
+        class Penguin {
+            constructor(x, y) {
+                this.pos = new Vec2(x, y);
+                this.vel = new Vec2(Math.random() * 2 - 1, Math.random() * 2 - 1);
+                this.acc = new Vec2(0, 0);
+                this.isBoundary = false;
+            }
+
+            applyForce(force) {
+                this.acc = this.acc.add(force);
+            }
+
+            update() {
+                this.vel = this.vel.add(this.acc);
+                this.vel = this.vel.limit(config.maxSpeed);
+                this.pos = this.pos.add(this.vel);
+                this.acc = new Vec2(0, 0); // reset
+            
+            // Containment (Soft boundary to keep them on screen)
+            let centerPoint = new Vec2(width / 2, height / 2);
+            let distToCenter = this.pos.dist(centerPoint);
+            if (distToCenter > height / 2.5) {
+                    let dir = centerPoint.sub(this.pos).normalize().mult(0.1);
+                    this.applyForce(dir);
+                }
+            }
+            
+            // Huddling behavior
+            behave(penguins, windVec) {
+                let cohesion = new Vec2(0, 0);
+                let separation = new Vec2(0, 0);
+                let countC = 0;
+                let countS = 0;
+
+                for (let other of penguins) {
+                    if (other === this) continue;
+                    let d = this.pos.dist(other.pos);
+
+                    if (d > 0 && d < config.cohesionRadius) {
+                        cohesion = cohesion.add(other.pos);
+                        countC++;
+                    }
+                    if (d > 0 && d < config.separationRadius) {
+                        let diff = this.pos.sub(other.pos).normalize().div(d); // Weight by distance
+                        separation = separation.add(diff);
+                        countS++;
+                    }
+                }
+
+                if (countC > 0) {
+                    cohesion = cohesion.div(countC).sub(this.pos).normalize().mult(0.05); // Move towards center
+                }
+                if (countS > 0) {
+                    separation = separation.div(countS).normalize().mult(0.15); // Strong separation to prevent overlap
+                }
+
+                this.applyForce(cohesion);
+                this.applyForce(separation);
+
+                // Wind Force (Affects boundary penguins more, pushing them leeward)
+                if (this.isBoundary) {
+                    // Dot product to determine if facing wind
+                    let windDir = windVec.normalize();
+                    // Vector from center of huddle to penguin
+                    let centerOfMass = getCenterOfMass();
+                    let toPenguin = this.pos.sub(centerOfMass).normalize();
+                    
+                    // If facing wind (dot product < 0), push them around the edge
+                    let exposure = toPenguin.x * windDir.x + toPenguin.y * windDir.y;
+                    if (exposure < -0.2) { 
+                        // Pushed by wind
+                        this.applyForce(windVec.mult(0.05));
+                        
+                        // Move tangentially to get to leeward side
+                        let tangent = new Vec2(-toPenguin.y, toPenguin.x); // perpendicular
+                        // Choose direction that goes with wind
+                        if (tangent.x * windDir.x + tangent.y * windDir.y < 0) {
+                            tangent = new Vec2(toPenguin.y, -toPenguin.x);
+                        }
+                        this.applyForce(tangent.mult(0.08 * config.windIntensity));
+                    }
+                }
+
+                // Random Noise / Restlessness (beta)
+                if (config.noise > 0) {
+                    let randomForce = new Vec2(Math.random()*2-1, Math.random()*2-1).mult(config.noise * 0.1);
+                    this.applyForce(randomForce);
+                }
+            }
+        }
+
+        function getCenterOfMass() {
+            if (penguins.length === 0) return new Vec2(width/2, height/2);
+            let sum = new Vec2(0,0);
+            for(let p of penguins) sum = sum.add(p.pos);
+            return sum.div(penguins.length);
+        }
+
+        function initPenguins() {
+            penguins = [];
+            let count = 0;
+            // First pass to find bounding box to center the tracks
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            for (const pid in reportTracks) {
+                const track = reportTracks[pid];
+                if (track && track.length > 0) {
+                    const pt = track[0];
+                    if (pt.x !== undefined && pt.y !== undefined) {
+                        if (pt.x < minX) minX = pt.x;
+                        if (pt.x > maxX) maxX = pt.x;
+                        if (pt.y < minY) minY = pt.y;
+                        if (pt.y > maxY) maxY = pt.y;
+                    }
+                }
+            }
+            
+            let cx = (minX + maxX) / 2;
+            let cy = (minY + maxY) / 2;
+            if (minX === Infinity) { cx = 0; cy = 0; }
+
+            for (const pid in reportTracks) {
+                const track = reportTracks[pid];
+                if (track && track.length > 0) {
+                    const pt = track[0];
+                    if (pt.x !== undefined && pt.y !== undefined) {
+                        let px = width/2 + (pt.x - cx) * 5; // scaled spread
+                        let py = height/2 + (pt.y - cy) * 5;
+                        let p = new Penguin(px, py);
+                        penguins.push(p);
+                        count++;
+                    }
+                }
+            }
+            
+            let num = Math.floor(config.population);
+            if (count > 0) {
+                config.population = count;
+                document.getElementById('ctrl-pop').value = count;
+                document.getElementById('val-pop').innerText = count;
+            } else {
+                while (penguins.length < num) {
+                    penguins.push(new Penguin(width/2 + (Math.random()*100-50), height/2 + (Math.random()*100-50)));
+                }
+            }
+            while (penguins.length > config.population) {
+                penguins.pop();
+            }
+        }
+
+        // Setup Event Listeners
+        document.getElementById('ctrl-wind').addEventListener('input', (e) => {
+            config.windIntensity = e.target.value / 100;
+            document.getElementById('val-wind').innerText = e.target.value + '%';
+        });
+        document.getElementById('ctrl-angle').addEventListener('input', (e) => {
+            config.windAngle = e.target.value * (Math.PI / 180);
+            document.getElementById('val-angle').innerText = e.target.value + '°';
+        });
+        document.getElementById('ctrl-noise').addEventListener('input', (e) => {
+            config.noise = e.target.value / 100;
+            document.getElementById('val-noise').innerText = e.target.value + '%';
+        });
+        document.getElementById('ctrl-pop').addEventListener('input', (e) => {
+            config.population = e.target.value;
+            document.getElementById('val-pop').innerText = e.target.value;
+            initPenguins();
+        });
+
+        function analyzeHuddle() {
+            if (penguins.length < 3) return;
+
+            // 1. Convex Hull
+            let points = penguins.map(p => p.pos);
+            let hullIdx = getConvexHull(points);
+            
+            // Mark boundaries
+            penguins.forEach(p => p.isBoundary = false);
+            hullIdx.forEach(idx => penguins[idx].isBoundary = true);
+
+            hullPoints = hullIdx.map(idx => penguins[idx].pos);
+            
+            // Find core
+            coreIndices.clear();
+            for(let i=0; i<penguins.length; i++) {
+                if(!penguins[i].isBoundary) coreIndices.add(i);
+            }
+
+            // 2. Compute Bounding Box aligned with wind (Approximating aspect ratio)
+            // To simplify, we'll calculate width along wind vector and height perpendicular to it
+            let windDir = new Vec2(Math.cos(config.windAngle), Math.sin(config.windAngle)).normalize();
+            let perpDir = new Vec2(-windDir.y, windDir.x);
+            
+            let minW = Infinity, maxW = -Infinity;
+            let minP = Infinity, maxP = -Infinity;
+
+            for (let pt of hullPoints) {
+                let projW = pt.x * windDir.x + pt.y * windDir.y;
+                let projP = pt.x * perpDir.x + pt.y * perpDir.y;
+                minW = Math.min(minW, projW); maxW = Math.max(maxW, projW);
+                minP = Math.min(minP, projP); maxP = Math.max(maxP, projP);
+            }
+
+            let lengthAlongWind = Math.max(1, maxW - minW);
+            let widthPerpWind = Math.max(1, maxP - minP);
+            
+            // Aspect ratio > 1 means elongated along wind. (Assuming huddle streamlines)
+            let aspectRatio = lengthAlongWind / widthPerpWind;
+            
+            // Limit aspect ratio artificially for stability in visuals
+            aspectRatio = Math.max(1.0, aspectRatio);
+
+            // 3. Peclet Number Estimation (Aspect Ratio cubed)
+            let peclet = Math.pow(aspectRatio, 3);
+
+            // 4. Core Density
+            let area = getPolygonArea(hullIdx);
+            let density = area > 0 ? (coreIndices.size / area) * 1000 : 0; // scaled for readability
+
+            // 5. Find Active Mover (Fastest boundary penguin)
+            let maxSpeed = -1;
+            activeMoverIndex = -1;
+            for(let idx of hullIdx) {
+                let speed = penguins[idx].vel.mag();
+                if(speed > maxSpeed) {
+                    maxSpeed = speed;
+                    activeMoverIndex = idx;
+                }
+            }
+
+            // Update UI
+            document.getElementById('metric-aspect').innerText = aspectRatio.toFixed(2);
+            document.getElementById('metric-peclet').innerText = peclet.toFixed(2);
+            document.getElementById('metric-density').innerText = density.toFixed(2);
+            document.getElementById('metric-mover').innerText = maxSpeed.toFixed(2) + ' px/f';
+        }
+
+        function draw() {
+        ctx.clearRect(0, 0, width, height);
+        
+        // Draw Wind Vector Indicator in background
+        let center = new Vec2(width/2, height/2);
+        let windVec = new Vec2(Math.cos(config.windAngle), Math.sin(config.windAngle)).mult(config.windIntensity * 150);
+        
+        if (config.windIntensity > 0) {
+                ctx.beginPath();
+                ctx.moveTo(center.x - windVec.x/2, center.y - windVec.y/2);
+                ctx.lineTo(center.x + windVec.x/2, center.y + windVec.y/2);
+                ctx.strokeStyle = 'rgba(59, 130, 246, 0.2)';
+                ctx.lineWidth = 40;
+                ctx.lineCap = 'round';
+                ctx.stroke();
+                
+                // Arrow head
+                ctx.beginPath();
+                let headEnd = center.add(windVec.div(2));
+                ctx.arc(headEnd.x, headEnd.y, 20, 0, Math.PI*2);
+                ctx.fillStyle = 'rgba(59, 130, 246, 0.3)';
+                ctx.fill();
+            }
+
+            // Draw Convex Hull
+            if (hullPoints.length > 2) {
+                ctx.beginPath();
+                ctx.moveTo(hullPoints[0].x, hullPoints[0].y);
+                for (let i = 1; i < hullPoints.length; i++) {
+                    ctx.lineTo(hullPoints[i].x, hullPoints[i].y);
+                }
+                ctx.closePath();
+                ctx.fillStyle = 'rgba(148, 163, 184, 0.1)'; // Slight fill for the hull
+                ctx.fill();
+                ctx.strokeStyle = 'rgba(148, 163, 184, 0.5)'; // Edge line
+                ctx.lineWidth = 1;
+                ctx.setLineDash([5, 5]);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+
+            // Draw Penguins
+            for (let i = 0; i < penguins.length; i++) {
+                let p = penguins[i];
+                ctx.beginPath();
+                ctx.arc(p.pos.x, p.pos.y, config.penguinRadius, 0, Math.PI * 2);
+                
+                if (i === activeMoverIndex) {
+                    // Active Mover
+                    ctx.fillStyle = '#facc15'; // yellow
+                    ctx.shadowColor = '#facc15';
+                    ctx.shadowBlur = 10;
+                } else if (p.isBoundary) {
+                    // Boundary
+                    ctx.fillStyle = '#a855f7'; // purple
+                    ctx.shadowBlur = 0;
+                } else {
+                    // Core
+                    ctx.fillStyle = '#e2e8f0'; // slate-200
+                    ctx.shadowBlur = 0;
+                }
+                
+                ctx.fill();
+                ctx.shadowBlur = 0; // reset
+            }
+        }
+
+        function animate() {
+            let windForce = new Vec2(Math.cos(config.windAngle), Math.sin(config.windAngle)).mult(config.windIntensity);
+
+            // Update Physics
+            for (let p of penguins) {
+                p.behave(penguins, windForce);
+            }
+            for (let p of penguins) {
+                p.update();
+            }
+
+            // Analyze
+            analyzeHuddle();
+
+            // Render
+            draw();
+
+            requestAnimationFrame(animate);
+        }
+
+        // Boot up
+        initPenguins();
+        animate();
+
+    </script>
+</body>
+</html>

@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Penguin Huddle Dynamics Simulator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #0f172a; color: #f8fafc; overflow: hidden; margin: 0; padding: 0;}
+        canvas { display: block; width: 100%; height: 100%; }
+        .glass-panel {
+            background: rgba(30, 41, 59, 0.8);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        /* Custom range slider styling */
+        input[type=range] {
+            -webkit-appearance: none;
+            width: 100%;
+            background: transparent;
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 16px;
+            width: 16px;
+            border-radius: 50%;
+            background: #3b82f6;
+            cursor: pointer;
+            margin-top: -6px;
+            box-shadow: 0 0 10px rgba(59, 130, 246, 0.5);
+        }
+        input[type=range]::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 4px;
+            cursor: pointer;
+            background: #475569;
+            border-radius: 2px;
+        }
+    </style>
+</head>
+<body class="flex h-screen w-screen bg-slate-900 overflow-hidden">
+
+    <div class="w-80 h-full glass-panel p-6 flex flex-col z-50 shadow-2xl overflow-y-auto flex-shrink-0 relative">
+        <h1 class="text-2xl font-bold mb-2 text-blue-400">Huddle Dynamics</h1>
+        <p class="text-xs text-slate-400 mb-6 border-b border-slate-700 pb-4">Thermodynamic & Geometric Simulation</p>
+
+        <!-- Metrics Display -->
+        <div class="mb-6 space-y-3">
+            <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">Live Metrics</h2>
+            
+            <div class="bg-slate-800/50 p-3 rounded-lg border border-slate-700 mb-3 text-xs text-slate-400 font-mono">
+                <strong>Env:</strong> <span id="env-data">{safe_env_context}</span>
+            </div>
+
+            <div class="bg-slate-800/50 p-3 rounded-lg border border-slate-700">
+                <div class="flex justify-between text-sm mb-1">
+                    <span class="text-slate-400">Peclet Number (Pe)</span>
+                    <span id="metric-peclet" class="font-mono font-bold text-orange-400">0.00</span>
+                </div>
+                <div class="text-[10px] text-slate-500">Convective vs Conductive heat transfer</div>
+            </div>
+
+            <div class="bg-slate-800/50 p-3 rounded-lg border border-slate-700">
+                <div class="flex justify-between text-sm mb-1">
+                    <span class="text-slate-400">Aspect Ratio</span>
+                    <span id="metric-aspect" class="font-mono font-bold text-blue-300">1.00</span>
+                </div>
+            </div>
+
+            <div class="bg-slate-800/50 p-3 rounded-lg border border-slate-700">
+                <div class="flex justify-between text-sm mb-1">
+                    <span class="text-slate-400">Core Density</span>
+                    <span id="metric-density" class="font-mono font-bold text-emerald-400">0.00</span>
+                </div>
+            </div>
+            
+            <div class="bg-slate-800/50 p-3 rounded-lg border border-slate-700 flex items-center justify-between">
+                <div class="text-sm text-slate-400">Mover Speed (Max)</div>
+                <span id="metric-mover" class="font-mono font-bold text-purple-400">0.00</span>
+            </div>
+        </div>
+
+        <div class="space-y-5">
+            <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">Controls</h2>
+            
+            <div>
+                <div class="flex justify-between text-xs mb-1">
+                    <label class="text-slate-400">Wind Intensity</label>
+                    <span id="val-wind" class="font-mono text-slate-300">50%</span>
+                </div>
+                <input type="range" id="ctrl-wind" min="0" max="100" value="50">
+            </div>
+
+            <div>
+                <div class="flex justify-between text-xs mb-1">
+                    <label class="text-slate-400">Wind Angle</label>
+                    <span id="val-angle" class="font-mono text-slate-300">180°</span>
+                </div>
+                <input type="range" id="ctrl-angle" min="0" max="360" value="180">
+            </div>
+
+            <div>
+                <div class="flex justify-between text-xs mb-1">
+                    <label class="text-slate-400">Noise / Restlessness (β)</label>
+                    <span id="val-noise" class="font-mono text-slate-300">20%</span>
+                </div>
+                <input type="range" id="ctrl-noise" min="0" max="100" value="20">
+            </div>
+
+            <div>
+                <div class="flex justify-between text-xs mb-1">
+                    <label class="text-slate-400">Population</label>
+                    <span id="val-pop" class="font-mono text-slate-300">150</span>
+                </div>
+                <input type="range" id="ctrl-pop" min="20" max="300" value="150">
+            </div>
+        </div>
+        
+        <div class="mt-auto pt-6">
+             <div class="flex items-center gap-2 text-xs text-slate-400">
+                <div class="w-3 h-3 rounded-full bg-slate-200"></div> Core
+             </div>
+             <div class="flex items-center gap-2 text-xs text-slate-400 mt-1">
+                <div class="w-3 h-3 rounded-full bg-purple-500"></div> Boundary
+             </div>
+             <div class="flex items-center gap-2 text-xs text-slate-400 mt-1">
+                <div class="w-3 h-3 rounded-full bg-yellow-400 shadow-[0_0_8px_rgba(250,204,21,0.8)]"></div> Active Mover
+             </div>
+        </div>
+    </div>
+
+    <!-- Canvas Container -->
+    <div class="flex-1 relative w-full h-full bg-slate-900">
+        <!-- Grid Background overlay -->
+        <div class="absolute inset-0 z-0 opacity-20 pointer-events-none" style="background-image: radial-gradient(#3b82f6 1px, transparent 1px); background-size: 40px 40px;"></div>
+        <canvas id="simCanvas" class="z-10 relative"></canvas>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('simCanvas');
+        const ctx = canvas.getContext('2d');
+        
+        let width, height;
+        let penguins = [];
+        let hullPoints = [];
+        let coreIndices = new Set();
+        let activeMoverIndex = -1;
+
+        const reportTracks = {tracks_json};
+
+        // Simulation Parameters
+        let config = {
+            windIntensity: 0.5,
+            windAngle: Math.PI, // 180 degrees
+            noise: 0.2,
+            population: 150,
+            penguinRadius: 4,
+            cohesionRadius: 100,
+            separationRadius: 12,
+            maxSpeed: 2.5
+        };
+
+        function resizeCanvas() {
+            width = canvas.parentElement.clientWidth;
+            height = canvas.parentElement.clientHeight;
+            canvas.width = width;
+            canvas.height = height;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // 2D Vector operations
+        class Vec2 {
+            constructor(x, y) { this.x = x; this.y = y; }
+            add(v) { return new Vec2(this.x + v.x, this.y + v.y); }
+            sub(v) { return new Vec2(this.x - v.x, this.y - v.y); }
+            mult(n) { return new Vec2(this.x * n, this.y * n); }
+            div(n) { return new Vec2(this.x / n, this.y / n); }
+            mag() { return Math.sqrt(this.x * this.x + this.y * this.y); }
+            normalize() { const m = this.mag(); return m === 0 ? new Vec2(0,0) : this.div(m); }
+            limit(max) { return this.mag() > max ? this.normalize().mult(max) : this; }
+            dist(v) { return this.sub(v).mag(); }
+        }
+
+        // Monotone Chain algorithm for Convex Hull (Alternative to SciPy's ConvexHull)
+        function getConvexHull(points) {
+            if (points.length < 3) return points.map((_, i) => i);
+
+            // Create array of objects with original indices to track which penguin is which
+            let pts = points.map((p, i) => ({ x: p.x, y: p.y, idx: i }));
+            
+            // Sort by x, then y
+            pts.sort((a, b) => a.x === b.x ? a.y - b.y : a.x - b.x);
+
+            const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+
+            let lower = [];
+            for (let i = 0; i < pts.length; i++) {
+                while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], pts[i]) <= 0) {
+                    lower.pop();
+                }
+                lower.push(pts[i]);
+            }
+
+            let upper = [];
+            for (let i = pts.length - 1; i >= 0; i--) {
+                while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], pts[i]) <= 0) {
+                    upper.pop();
+                }
+                upper.push(pts[i]);
+            }
+
+            upper.pop(); lower.pop();
+            return lower.concat(upper).map(p => p.idx);
+        }
+
+        // Polygon area
+        function getPolygonArea(indices) {
+            let area = 0;
+            for (let i = 0; i < indices.length; i++) {
+                let j = (i + 1) % indices.length;
+                let p1 = penguins[indices[i]].pos;
+                let p2 = penguins[indices[j]].pos;
+                area += p1.x * p2.y - p2.x * p1.y;
+            }
+            return Math.abs(area / 2);
+        }
+
+        class Penguin {
+            constructor(x, y) {
+                this.pos = new Vec2(x, y);
+                this.vel = new Vec2(Math.random() * 2 - 1, Math.random() * 2 - 1);
+                this.acc = new Vec2(0, 0);
+                this.isBoundary = false;
+            }
+
+            applyForce(force) {
+                this.acc = this.acc.add(force);
+            }
+
+            update() {
+                this.vel = this.vel.add(this.acc);
+                this.vel = this.vel.limit(config.maxSpeed);
+                this.pos = this.pos.add(this.vel);
+                this.acc = new Vec2(0, 0); // reset
+            
+            // Containment (Soft boundary to keep them on screen)
+            let centerPoint = new Vec2(width / 2, height / 2);
+            let distToCenter = this.pos.dist(centerPoint);
+            if (distToCenter > height / 2.5) {
+                    let dir = centerPoint.sub(this.pos).normalize().mult(0.1);
+                    this.applyForce(dir);
+                }
+            }
+            
+            // Huddling behavior
+            behave(penguins, windVec) {
+                let cohesion = new Vec2(0, 0);
+                let separation = new Vec2(0, 0);
+                let countC = 0;
+                let countS = 0;
+
+                for (let other of penguins) {
+                    if (other === this) continue;
+                    let d = this.pos.dist(other.pos);
+
+                    if (d > 0 && d < config.cohesionRadius) {
+                        cohesion = cohesion.add(other.pos);
+                        countC++;
+                    }
+                    if (d > 0 && d < config.separationRadius) {
+                        let diff = this.pos.sub(other.pos).normalize().div(d); // Weight by distance
+                        separation = separation.add(diff);
+                        countS++;
+                    }
+                }
+
+                if (countC > 0) {
+                    cohesion = cohesion.div(countC).sub(this.pos).normalize().mult(0.05); // Move towards center
+                }
+                if (countS > 0) {
+                    separation = separation.div(countS).normalize().mult(0.15); // Strong separation to prevent overlap
+                }
+
+                this.applyForce(cohesion);
+                this.applyForce(separation);
+
+                // Wind Force (Affects boundary penguins more, pushing them leeward)
+                if (this.isBoundary) {
+                    // Dot product to determine if facing wind
+                    let windDir = windVec.normalize();
+                    // Vector from center of huddle to penguin
+                    let centerOfMass = getCenterOfMass();
+                    let toPenguin = this.pos.sub(centerOfMass).normalize();
+                    
+                    // If facing wind (dot product < 0), push them around the edge
+                    let exposure = toPenguin.x * windDir.x + toPenguin.y * windDir.y;
+                    if (exposure < -0.2) { 
+                        // Pushed by wind
+                        this.applyForce(windVec.mult(0.05));
+                        
+                        // Move tangentially to get to leeward side
+                        let tangent = new Vec2(-toPenguin.y, toPenguin.x); // perpendicular
+                        // Choose direction that goes with wind
+                        if (tangent.x * windDir.x + tangent.y * windDir.y < 0) {
+                            tangent = new Vec2(toPenguin.y, -toPenguin.x);
+                        }
+                        this.applyForce(tangent.mult(0.08 * config.windIntensity));
+                    }
+                }
+
+                // Random Noise / Restlessness (beta)
+                if (config.noise > 0) {
+                    let randomForce = new Vec2(Math.random()*2-1, Math.random()*2-1).mult(config.noise * 0.1);
+                    this.applyForce(randomForce);
+                }
+            }
+        }
+
+        function getCenterOfMass() {
+            if (penguins.length === 0) return new Vec2(width/2, height/2);
+            let sum = new Vec2(0,0);
+            for(let p of penguins) sum = sum.add(p.pos);
+            return sum.div(penguins.length);
+        }
+
+        function initPenguins() {
+            penguins = [];
+            let count = 0;
+            // First pass to find bounding box to center the tracks
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            for (const pid in reportTracks) {
+                const track = reportTracks[pid];
+                if (track && track.length > 0) {
+                    const pt = track[0];
+                    if (pt.x !== undefined && pt.y !== undefined) {
+                        if (pt.x < minX) minX = pt.x;
+                        if (pt.x > maxX) maxX = pt.x;
+                        if (pt.y < minY) minY = pt.y;
+                        if (pt.y > maxY) maxY = pt.y;
+                    }
+                }
+            }
+            
+            let cx = (minX + maxX) / 2;
+            let cy = (minY + maxY) / 2;
+            if (minX === Infinity) { cx = 0; cy = 0; }
+
+            for (const pid in reportTracks) {
+                const track = reportTracks[pid];
+                if (track && track.length > 0) {
+                    const pt = track[0];
+                    if (pt.x !== undefined && pt.y !== undefined) {
+                        let px = width/2 + (pt.x - cx) * 5; // scaled spread
+                        let py = height/2 + (pt.y - cy) * 5;
+                        let p = new Penguin(px, py);
+                        penguins.push(p);
+                        count++;
+                    }
+                }
+            }
+            
+            let num = Math.floor(config.population);
+            if (count > 0) {
+                config.population = count;
+                document.getElementById('ctrl-pop').value = count;
+                document.getElementById('val-pop').innerText = count;
+            } else {
+                while (penguins.length < num) {
+                    penguins.push(new Penguin(width/2 + (Math.random()*100-50), height/2 + (Math.random()*100-50)));
+                }
+            }
+            while (penguins.length > config.population) {
+                penguins.pop();
+            }
+        }
+
+        // Setup Event Listeners
+        document.getElementById('ctrl-wind').addEventListener('input', (e) => {
+            config.windIntensity = e.target.value / 100;
+            document.getElementById('val-wind').innerText = e.target.value + '%';
+        });
+        document.getElementById('ctrl-angle').addEventListener('input', (e) => {
+            config.windAngle = e.target.value * (Math.PI / 180);
+            document.getElementById('val-angle').innerText = e.target.value + '°';
+        });
+        document.getElementById('ctrl-noise').addEventListener('input', (e) => {
+            config.noise = e.target.value / 100;
+            document.getElementById('val-noise').innerText = e.target.value + '%';
+        });
+        document.getElementById('ctrl-pop').addEventListener('input', (e) => {
+            config.population = e.target.value;
+            document.getElementById('val-pop').innerText = e.target.value;
+            initPenguins();
+        });
+
+        function analyzeHuddle() {
+            if (penguins.length < 3) return;
+
+            // 1. Convex Hull
+            let points = penguins.map(p => p.pos);
+            let hullIdx = getConvexHull(points);
+            
+            // Mark boundaries
+            penguins.forEach(p => p.isBoundary = false);
+            hullIdx.forEach(idx => penguins[idx].isBoundary = true);
+
+            hullPoints = hullIdx.map(idx => penguins[idx].pos);
+            
+            // Find core
+            coreIndices.clear();
+            for(let i=0; i<penguins.length; i++) {
+                if(!penguins[i].isBoundary) coreIndices.add(i);
+            }
+
+            // 2. Compute Bounding Box aligned with wind (Approximating aspect ratio)
+            // To simplify, we'll calculate width along wind vector and height perpendicular to it
+            let windDir = new Vec2(Math.cos(config.windAngle), Math.sin(config.windAngle)).normalize();
+            let perpDir = new Vec2(-windDir.y, windDir.x);
+            
+            let minW = Infinity, maxW = -Infinity;
+            let minP = Infinity, maxP = -Infinity;
+
+            for (let pt of hullPoints) {
+                let projW = pt.x * windDir.x + pt.y * windDir.y;
+                let projP = pt.x * perpDir.x + pt.y * perpDir.y;
+                minW = Math.min(minW, projW); maxW = Math.max(maxW, projW);
+                minP = Math.min(minP, projP); maxP = Math.max(maxP, projP);
+            }
+
+            let lengthAlongWind = Math.max(1, maxW - minW);
+            let widthPerpWind = Math.max(1, maxP - minP);
+            
+            // Aspect ratio > 1 means elongated along wind. (Assuming huddle streamlines)
+            let aspectRatio = lengthAlongWind / widthPerpWind;
+            
+            // Limit aspect ratio artificially for stability in visuals
+            aspectRatio = Math.max(1.0, aspectRatio);
+
+            // 3. Peclet Number Estimation (Aspect Ratio cubed)
+            let peclet = Math.pow(aspectRatio, 3);
+
+            // 4. Core Density
+            let area = getPolygonArea(hullIdx);
+            let density = area > 0 ? (coreIndices.size / area) * 1000 : 0; // scaled for readability
+
+            // 5. Find Active Mover (Fastest boundary penguin)
+            let maxSpeed = -1;
+            activeMoverIndex = -1;
+            for(let idx of hullIdx) {
+                let speed = penguins[idx].vel.mag();
+                if(speed > maxSpeed) {
+                    maxSpeed = speed;
+                    activeMoverIndex = idx;
+                }
+            }
+
+            // Update UI
+            document.getElementById('metric-aspect').innerText = aspectRatio.toFixed(2);
+            document.getElementById('metric-peclet').innerText = peclet.toFixed(2);
+            document.getElementById('metric-density').innerText = density.toFixed(2);
+            document.getElementById('metric-mover').innerText = maxSpeed.toFixed(2) + ' px/f';
+        }
+
+        function draw() {
+        ctx.clearRect(0, 0, width, height);
+        
+        // Draw Wind Vector Indicator in background
+        let center = new Vec2(width/2, height/2);
+        let windVec = new Vec2(Math.cos(config.windAngle), Math.sin(config.windAngle)).mult(config.windIntensity * 150);
+        
+        if (config.windIntensity > 0) {
+                ctx.beginPath();
+                ctx.moveTo(center.x - windVec.x/2, center.y - windVec.y/2);
+                ctx.lineTo(center.x + windVec.x/2, center.y + windVec.y/2);
+                ctx.strokeStyle = 'rgba(59, 130, 246, 0.2)';
+                ctx.lineWidth = 40;
+                ctx.lineCap = 'round';
+                ctx.stroke();
+                
+                // Arrow head
+                ctx.beginPath();
+                let headEnd = center.add(windVec.div(2));
+                ctx.arc(headEnd.x, headEnd.y, 20, 0, Math.PI*2);
+                ctx.fillStyle = 'rgba(59, 130, 246, 0.3)';
+                ctx.fill();
+            }
+
+            // Draw Convex Hull
+            if (hullPoints.length > 2) {
+                ctx.beginPath();
+                ctx.moveTo(hullPoints[0].x, hullPoints[0].y);
+                for (let i = 1; i < hullPoints.length; i++) {
+                    ctx.lineTo(hullPoints[i].x, hullPoints[i].y);
+                }
+                ctx.closePath();
+                ctx.fillStyle = 'rgba(148, 163, 184, 0.1)'; // Slight fill for the hull
+                ctx.fill();
+                ctx.strokeStyle = 'rgba(148, 163, 184, 0.5)'; // Edge line
+                ctx.lineWidth = 1;
+                ctx.setLineDash([5, 5]);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+
+            // Draw Penguins
+            for (let i = 0; i < penguins.length; i++) {
+                let p = penguins[i];
+                ctx.beginPath();
+                ctx.arc(p.pos.x, p.pos.y, config.penguinRadius, 0, Math.PI * 2);
+                
+                if (i === activeMoverIndex) {
+                    // Active Mover
+                    ctx.fillStyle = '#facc15'; // yellow
+                    ctx.shadowColor = '#facc15';
+                    ctx.shadowBlur = 10;
+                } else if (p.isBoundary) {
+                    // Boundary
+                    ctx.fillStyle = '#a855f7'; // purple
+                    ctx.shadowBlur = 0;
+                } else {
+                    // Core
+                    ctx.fillStyle = '#e2e8f0'; // slate-200
+                    ctx.shadowBlur = 0;
+                }
+                
+                ctx.fill();
+                ctx.shadowBlur = 0; // reset
+            }
+        }
+
+        function animate() {
+            let windForce = new Vec2(Math.cos(config.windAngle), Math.sin(config.windAngle)).mult(config.windIntensity);
+
+            // Update Physics
+            for (let p of penguins) {
+                p.behave(penguins, windForce);
+            }
+            for (let p of penguins) {
+                p.update();
+            }
+
+            // Analyze
+            analyzeHuddle();
+
+            // Render
+            draw();
+
+            requestAnimationFrame(animate);
+        }
+
+        // Boot up
+        initPenguins();
+        animate();
+
+    </script>
+</body>
+</html>
