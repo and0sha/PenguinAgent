@@ -15,7 +15,7 @@ PenguinAgent is an AI-powered ornithologist application designed to automate the
 
 1. **Clone the repository:**
    ```bash
-   git clone <repository_url>
+   git clone <https://github.com/and0sha/PenguinAgent>
    cd PenguinAgent
    ```
 
@@ -49,7 +49,7 @@ PenguinAgent is an AI-powered ornithologist application designed to automate the
 
 2. **Interface Navigation:**
    - **Main Dashboard:** Select videos, initialize the RAG database, and configure processing options.
-   - **Track & Analyze:** Run the tracking algorithms on video files to generate `tracks.json`.
+   - **Track & Analyze:** Run the tracking algorithms on video files to generate `tracks.json` and annotated video.
    - **Scientific Reports:** Generate comprehensive markdown reports detailing behavioral anomalies and overall findings.
    - **Interactive Mode:** Ask the agent questions and mention specific tracks using the `@` symbol for targeted insights.
 
@@ -68,8 +68,5 @@ VIDEOS_DIR=./videos
 - **`main_gui.py`**: Streamlit frontend and entry point.
 - **`behave_ai.py`**: The core `BehaviorAgent` class unifying tracking, RAG, reporting, and huddling mixins.
 - **`behave_tracking.py`**, **`behave_report.py`**, **`behave_rag.py`**, **`behave_huddle.py`**: Modular mixins containing specialized agent skills.
-- **`tools/`**: Sub-modules for computer vision tasks (SAM 3 tracking, rendering, etc.).
+- **`tools/`**: Sub-modules for computer vision tasks (SAM 3 tracking, SigLIP2, linear probe, etc.).
 
-## License
-
-Please refer to the LICENSE file for more information.
