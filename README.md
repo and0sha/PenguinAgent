@@ -15,7 +15,7 @@ PenguinAgent is an AI-powered ornithologist application designed to automate the
 
 1. **Clone the repository:**
    ```bash
-   git clone <https://github.com/and0sha/PenguinAgent>
+   git clone https://github.com/and0sha/PenguinAgent
    cd PenguinAgent
    ```
 
