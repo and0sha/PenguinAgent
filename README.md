@@ -4,7 +4,7 @@ PenguinAgent is an AI-powered ornithologist application designed to automate the
 
 ## Features
 
-- **Video Telemetry & Tracking:** Employs SAM 3 (Segment Anything Model 3) and SigLIP to track individual penguins across video frames, extracting spatial coordinates, velocities, and area metrics.
+- **Video Telemetry & Tracking:** Employs SAM 3 (Segment Anything Model 3) to track individual penguins across video frames, extracting spatial coordinates, velocities, and area metrics  and we use SigLIP2 + linear probe on 18 penguin species for accurate species identification. 
 - **Multimodal AI Analysis:** Uses Ollama (running the `gemma4:26b` model by default) to interpret video frames and telemetry data to generate comprehensive scientific reports and anomaly assessments.
 - **Retrieval-Augmented Generation (RAG):** Integrates LangChain and FAISS to ground the AI's analysis in relevant scientific literature, providing verifiable citations.
 - **Interactive Chat & Queries:** A Streamlit-based GUI allows researchers to interrogate the AI about specific penguins (e.g., `@penguin_1`), general behavioral literature, and complex dynamics.
