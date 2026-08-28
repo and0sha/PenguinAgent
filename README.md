@@ -70,3 +70,5 @@ VIDEOS_DIR=./videos
 - **`behave_tracking.py`**, **`behave_report.py`**, **`behave_rag.py`**, **`behave_huddle.py`**: Modular mixins containing specialized agent skills.
 - **`tools/`**: Sub-modules for computer vision tasks (SAM 3 tracking, SigLIP2, linear probe, etc.).
 
+## License
+This project is licensed under the [Creative Commons Attribution 4.0 International License](http://creativecommons.org/licenses/by/4.0/).
