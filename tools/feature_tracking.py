@@ -2,21 +2,217 @@ import os
 import sys
 import glob
 import multiprocessing
-import subprocess
 import json
-import numpy as np
-import cv2
-from scipy.optimize import linear_sum_assignment
+import math
+from pathlib import Path
+import shutil
+import tempfile
 
 from tools.tracking_config import CHUNK_DURATION_SEC, MAX_DIST_REL_WIDTH
-from tools.tracking_utils import create_lightweight_proxy_video
+from tools.tracking_utils import create_lightweight_proxy_video, require_nonempty_file, run_ffmpeg, validate_video
+from tools.tracking_results import TrackingError, validate_tracks
 from tools.tracking_sam3 import _run_sam3_subprocess
 from tools.tracking_siglip import get_penguin_species_batch
 from tools.tracking_render import render_final_video
+from tools.tracking_identity import match_boundary
+from tools.tracking_kinematics import recompute_velocities
 
 def extract_tracks(video_path, output_json="tracks.json", output_video="annotated.mp4", model_name="gemma4:26b", **kwargs):
+    """Produce complete results in isolation; failed stages never replace JSON."""
+    video_path, output_json, output_video = map(os.fspath, (video_path, output_json, output_video))
+    json_path, video_output = Path(output_json).resolve(), Path(output_video).resolve()
+    if json_path == video_output or Path(video_path).resolve() in (json_path, video_output):
+        raise TrackingError("Input video, output JSON and output video must have distinct paths.")
+    crop_parent = kwargs.pop("crop_dir", None)
+    try:
+        require_nonempty_file(video_path, "Input video")
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        video_output.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".tracking-", dir=video_output.parent) as working:
+            work_dir = Path(working)
+            if crop_parent is None:
+                crop_parent = work_dir
+            Path(crop_parent).mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="crops-", dir=crop_parent) as crops:
+                staged_json = work_dir / "tracks.json"
+                staged_video = work_dir / "annotated.mp4"
+                _extract_tracks(video_path, str(staged_json), str(staged_video), model_name, crop_dir=crops, **kwargs)
+                require_nonempty_file(staged_json, "Tracking JSON")
+                validate_video(staged_video, "Completed tracking video")
+                # Prepare the small JSON beside its destination before publishing.
+                fd, pending_json = tempfile.mkstemp(prefix=".tracks-", suffix=".json", dir=json_path.parent)
+                os.close(fd)
+                pending_mapping = None
+                try:
+                    shutil.copyfile(staged_json, pending_json)
+                    staged_mapping = staged_json.with_name("tracks_species_mapping.txt")
+                    final_mapping = json_path.with_name(json_path.stem + "_species_mapping.txt")
+                    if staged_mapping.exists():
+                        fd, pending_mapping = tempfile.mkstemp(prefix=".species-", suffix=".txt", dir=json_path.parent)
+                        os.close(fd)
+                        shutil.copyfile(staged_mapping, pending_mapping)
+                    os.replace(staged_video, video_output)
+                    if pending_mapping is not None:
+                        os.replace(pending_mapping, final_mapping)
+                    elif final_mapping.exists():
+                        final_mapping.unlink()
+                    os.replace(pending_json, json_path)
+                finally:
+                    if os.path.exists(pending_json):
+                        os.remove(pending_json)
+                    if pending_mapping is not None and os.path.exists(pending_mapping):
+                        os.remove(pending_mapping)
+        print(f"Tracking complete. Data saved to {output_json} and {output_video}.")
+        return output_json, output_video
+    except TrackingError:
+        raise
+    except Exception as exc:
+        raise TrackingError(f"Tracking failed: {exc}") from exc
+
+
+def _read_chunk_result(path, exitcode, chunk_number):
+    require_nonempty_file(path, f"SAM 3 chunk {chunk_number} result (process exit {exitcode})")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise TrackingError(f"SAM 3 chunk {chunk_number} returned invalid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise TrackingError(f"SAM 3 chunk {chunk_number} returned an invalid result object.")
+    if exitcode != 0 or data.get("status") != "ok":
+        raise TrackingError(f"SAM 3 chunk {chunk_number} failed (exit {exitcode}): {data.get('error', 'missing success status')}")
+    tracks, annotations, crops = (data.get(key) for key in ("tracks", "text_annotations", "crops_saved"))
+    if not isinstance(tracks, dict) or not isinstance(annotations, list) or not annotations or not isinstance(crops, list):
+        raise TrackingError(f"SAM 3 chunk {chunk_number} returned an incomplete result schema.")
+    if any(type(obj_id) is not int or obj_id < 0 for obj_id in crops):
+        raise TrackingError(f"SAM 3 chunk {chunk_number} returned invalid crop identifiers.")
+    for pid, samples in tracks.items():
+        if not isinstance(pid, str) or not pid.startswith("obj_") or not pid[4:].isdigit() or not isinstance(samples, list):
+            raise TrackingError(f"SAM 3 chunk {chunk_number} returned an invalid track identifier or samples.")
+        for sample in samples:
+            if not isinstance(sample, dict) or any(
+                type(sample.get(key)) not in (int, float) or not math.isfinite(sample[key])
+                for key in ("second", "x", "y", "area", "vx", "vy")
+            ):
+                raise TrackingError(f"SAM 3 chunk {chunk_number} returned invalid tracking measurements.")
+    observed_ids = {int(pid[4:]) for pid in tracks}
+    for frame in annotations:
+        if not isinstance(frame, list) or any(
+            not isinstance(ann, dict) or any(type(ann.get(key)) is not int for key in ("obj_id", "cx", "cy"))
+            for ann in frame
+        ):
+            raise TrackingError(f"SAM 3 chunk {chunk_number} returned invalid frame annotations.")
+        frame_ids = [ann["obj_id"] for ann in frame]
+        if len(frame_ids) != len(set(frame_ids)) or any(obj_id < 0 for obj_id in frame_ids):
+            raise TrackingError(f"SAM 3 chunk {chunk_number} returned duplicate or invalid IDs in one frame.")
+        observed_ids.update(ann["obj_id"] for ann in frame)
+    if not observed_ids.issubset(set(crops)):
+        raise TrackingError(f"SAM 3 chunk {chunk_number} is missing classification crops for observed objects.")
+    return data
+
+
+def _validate_chunk_telemetry(data, fps, chunk_number):
+    """Bind each sparse telemetry sample to its actual annotated local frame.
+
+    Samples may be a subset of frame observations, and annotation-only animals
+    remain valid. A present sample must use the same local ID, centroid and
+    timestamp as its frame; otherwise downstream stitching could publish data
+    that contradicts the video. Tolerance is one millionth of a frame/pixel.
+    """
+    frames = [{ann["obj_id"]: ann for ann in frame} for frame in data["text_annotations"]]
+    canonical_ids = set()
+    for pid, samples in data["tracks"].items():
+        local_id = int(pid[4:])
+        if local_id in canonical_ids:
+            raise TrackingError(f"SAM 3 chunk {chunk_number} contains duplicate canonical local track IDs.")
+        canonical_ids.add(local_id)
+        if not samples:
+            raise TrackingError(f"SAM 3 chunk {chunk_number} has an empty sampled track.")
+        previous_second = -1.0
+        previous_frame_index = -1
+        for sample in samples:
+            second = sample["second"]
+            frame_position = second * fps
+            if second < 0 or second <= previous_second or not math.isfinite(frame_position):
+                raise TrackingError(f"SAM 3 chunk {chunk_number} has invalid sample chronology.")
+            previous_second = second
+            frame_index = round(frame_position)
+            if (frame_index < 0 or frame_index >= len(frames)
+                    or not math.isclose(frame_position, frame_index, rel_tol=0, abs_tol=1e-6)):
+                raise TrackingError(f"SAM 3 chunk {chunk_number} sample timestamp does not identify a local frame.")
+            if frame_index <= previous_frame_index:
+                raise TrackingError(f"SAM 3 chunk {chunk_number} repeats or reverses a sampled local frame.")
+            previous_frame_index = frame_index
+            annotation = frames[frame_index].get(local_id)
+            if annotation is None:
+                raise TrackingError(f"SAM 3 chunk {chunk_number} sample has no matching local object in its frame.")
+            if (not math.isclose(sample["x"], annotation["cx"], rel_tol=0, abs_tol=1e-6)
+                    or not math.isclose(sample["y"], annotation["cy"], rel_tol=0, abs_tol=1e-6)):
+                raise TrackingError(f"SAM 3 chunk {chunk_number} sample centroid differs from its frame annotation.")
+
+
+def _stitch_chunk(data, previous_boundary, identity_history, next_obj_id, frame_offset, fps, max_distance, chunk_crops, global_crops):
+    """Give local IDs one injective global mapping, using only adjacent boundary frames."""
+    annotations = data["text_annotations"]
+    first_points = {ann["obj_id"]: (ann["cx"], ann["cy"]) for ann in annotations[0]}
+    current_second = frame_offset / fps
+    mapping = match_boundary(previous_boundary, first_points, current_second, max_distance)
+    if not set(mapping).issubset(first_points) or not set(mapping.values()).issubset(previous_boundary):
+        raise TrackingError("Boundary association returned IDs outside the adjacent boundary frames.")
+    if len(set(mapping.values())) != len(mapping):
+        raise TrackingError("Boundary association would merge different animals into one global ID.")
+
+    # Reserve IDs from all observations, including animals absent from sampled tracks.
+    local_order = []
+    for frame in annotations:
+        local_order.extend(ann["obj_id"] for ann in sorted(frame, key=lambda ann: ann["obj_id"]))
+    local_order.extend(sorted(set(data["crops_saved"]) | {int(pid[4:]) for pid in data["tracks"]}))
+    for local_id in local_order:
+        if local_id not in mapping:
+            mapping[local_id] = next_obj_id
+            next_obj_id += 1
+    if len(set(mapping.values())) != len(mapping):
+        raise TrackingError("Chunk association does not assign a unique global ID to each local animal.")
+
+    tracks = {}
+    for pid, samples in data["tracks"].items():
+        global_pid = f"obj_{mapping[int(pid[4:])]}"
+        if global_pid in tracks:
+            raise TrackingError("Chunk data contains duplicate local track identifiers.")
+        tracks[global_pid] = [dict(sample, second=sample["second"] + current_second) for sample in samples]
+
+    remapped_annotations = []
+    last_ids = set()
+    for frame_index, frame in enumerate(annotations):
+        remapped = [dict(ann, obj_id=mapping[ann["obj_id"]]) for ann in frame]
+        last_ids = {ann["obj_id"] for ann in remapped}
+        if len(last_ids) != len(remapped):
+            raise TrackingError("Chunk association created duplicate global IDs within a frame.")
+        timestamp = (frame_offset + frame_index) / fps
+        for ann in remapped:
+            history = identity_history.setdefault(ann["obj_id"], [])
+            history.append({"second": timestamp, "x": ann["cx"], "y": ann["cy"]})
+            del history[:-2]
+        remapped_annotations.append(remapped)
+
+    global_crop_ids = set()
+    for local_id in data["crops_saved"]:
+        source = Path(chunk_crops) / f"penguin_crop_{local_id}.jpg"
+        require_nonempty_file(source, f"Classification crop for local object {local_id}")
+        global_id = mapping[local_id]
+        destination = Path(global_crops) / f"penguin_crop_{global_id}.jpg"
+        if not destination.exists():
+            shutil.copyfile(source, destination)
+        require_nonempty_file(destination, f"Classification crop for global object {global_id}")
+        global_crop_ids.add(global_id)
+
+    boundary = {global_id: list(identity_history[global_id]) for global_id in last_ids}
+    return tracks, remapped_annotations, global_crop_ids, boundary, next_obj_id
+
+
+def _extract_tracks(video_path, output_json, output_video, model_name, *, crop_dir, **kwargs):
     proxy_video = output_video + ".proxy.mp4"
-    temp_output_video = output_video.replace(".mp4", "_temp_raw.mp4")
+    temp_output_video = str(Path(output_video).with_name("raw_render.mp4"))
     
     chunk_files = []
     temp_videos = []
@@ -28,20 +224,22 @@ def extract_tracks(video_path, output_json="tracks.json", output_video="annotate
     
     print(f"Chunking video into {CHUNK_DURATION_SEC}-second segments...")
     chunk_pattern = proxy_video + "_chunk_%03d.mp4"
-    subprocess.run([
+    run_ffmpeg([
         'ffmpeg', '-y', '-i', proxy_video,
         '-c', 'copy', '-map', '0', '-segment_time', str(CHUNK_DURATION_SEC), 
         '-reset_timestamps', '1',
         '-f', 'segment', chunk_pattern
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    ], "Video segmentation")
     
-    chunk_files = sorted(glob.glob(proxy_video + "_chunk_*.mp4"))
-    
-    cap_proxy = cv2.VideoCapture(proxy_video)
-    fps = cap_proxy.get(cv2.CAP_PROP_FPS)
-    if fps <= 0: fps = 30
-    width = int(cap_proxy.get(cv2.CAP_PROP_FRAME_WIDTH))
-    cap_proxy.release()
+    chunk_files = sorted(glob.glob(proxy_video + "_chunk_*.mp4"),
+                         key=lambda path: int(Path(path).stem.rsplit("_", 1)[1]))
+    if not chunk_files:
+        raise TrackingError("Video segmentation produced no chunks.")
+    fps, width, _ = validate_video(proxy_video, "Proxy video")
+    for chunk_file in chunk_files:
+        chunk_fps, _, _ = validate_video(chunk_file, "Video chunk")
+        if not math.isclose(chunk_fps, fps, rel_tol=1e-6, abs_tol=1e-6):
+            raise TrackingError("Video chunk frame rate differs from the constant-rate proxy.")
     
     max_dist_pixels = width * MAX_DIST_REL_WIDTH
     
@@ -53,8 +251,8 @@ def extract_tracks(video_path, output_json="tracks.json", output_video="annotate
     ctx = multiprocessing.get_context("spawn")
     
     next_obj_id = 0
-    prev_points = {}
-    global_trajectories = {}
+    previous_boundary = {}
+    identity_history = {}
     
     try:
         for i, chunk_file in enumerate(chunk_files):
@@ -66,115 +264,36 @@ def extract_tracks(video_path, output_json="tracks.json", output_video="annotate
             if os.path.exists(chunk_temp_vid): os.remove(chunk_temp_vid)
             if os.path.exists(chunk_temp_data): os.remove(chunk_temp_data)
             
-            p = ctx.Process(target=_run_sam3_subprocess, args=(chunk_file, chunk_temp_vid, chunk_temp_data, next_obj_id, prev_points, global_trajectories))
+            chunk_crops = Path(crop_dir) / f"chunk-{i:03d}"
+            chunk_crops.mkdir()
+            # Workers own only chunk-local SAM IDs. Global identity belongs here.
+            worker_args = (chunk_file, chunk_temp_vid, chunk_temp_data, 0, None, None, str(chunk_crops))
+            if kwargs.get("sam3_config_path") is not None:
+                worker_args += (os.fspath(kwargs["sam3_config_path"]),)
+            p = ctx.Process(target=_run_sam3_subprocess, args=worker_args)
             active_process = p
             p.start()
             p.join()
             active_process = None
             
-            if p.exitcode != 0 or not os.path.exists(chunk_temp_data):
-                print(f"SAM 3 Subprocess failed or crashed on chunk {i+1}. Tracking aborted.")
-                return None, None
+            data = _read_chunk_result(chunk_temp_data, p.exitcode, i + 1)
+            _validate_chunk_telemetry(data, fps, i + 1)
+            annotation_count = len(data["text_annotations"])
+            validate_video(chunk_file, f"SAM 3 chunk {i+1} input", expected_frames=annotation_count)
+            worker_fps, _, _ = validate_video(chunk_temp_vid, f"SAM 3 chunk {i+1} video", expected_frames=annotation_count)
+            if not math.isclose(worker_fps, fps, rel_tol=1e-6, abs_tol=1e-6):
+                raise TrackingError(f"SAM 3 chunk {i+1} video frame rate differs from the proxy.")
                 
-            with open(chunk_temp_data, 'r') as f:
-                data = json.load(f)
-                
-            frame_offset = len(all_text_annotations)
-            second_offset = frame_offset // int(fps)
-            
-            if i > 0 and len(all_tracks) > 0 and len(data["tracks"]) > 0:
-                max_second_prev = -1
-                for pid, t_list in all_tracks.items():
-                    if len(t_list) > 0:
-                        max_second_prev = max(max_second_prev, t_list[-1]["second"])
-                
-                prev_points = {}
-                for pid, t_list in all_tracks.items():
-                    if len(t_list) > 0 and t_list[-1]["second"] >= max_second_prev - 2:
-                        prev_points[pid] = (t_list[-1]["x"], t_list[-1]["y"])
-                        
-                curr_points = {}
-                for pid, t_list in data["tracks"].items():
-                    if len(t_list) > 0 and t_list[0]["second"] <= 2:
-                        curr_points[pid] = (t_list[0]["x"], t_list[0]["y"])
-                        
-                if prev_points and curr_points:
-                    prev_pids = list(prev_points.keys())
-                    curr_pids = list(curr_points.keys())
-                    
-                    cost_matrix = np.zeros((len(prev_pids), len(curr_pids)))
-                    for r, pp_id in enumerate(prev_pids):
-                        px, py = prev_points[pp_id]
-                        for c, cp_id in enumerate(curr_pids):
-                            cx, cy = curr_points[cp_id]
-                            cost_matrix[r, c] = np.hypot(px - cx, py - cy)
-                            
-                    row_ind, col_ind = linear_sum_assignment(cost_matrix)
-                    
-                    mapping = {}
-                    for r, c in zip(row_ind, col_ind):
-                        if cost_matrix[r, c] < max_dist_pixels:
-                            mapping[curr_pids[c]] = prev_pids[r]
-                    
-                    new_tracks = {}
-                    for pid, t_list in data["tracks"].items():
-                        mapped_pid = mapping.get(pid, pid)
-                        if mapped_pid not in new_tracks:
-                            new_tracks[mapped_pid] = []
-                        new_tracks[mapped_pid].extend(t_list)
-                    data["tracks"] = new_tracks
-                    
-                    for frame_ann in data["text_annotations"]:
-                        for ann in frame_ann:
-                            pid_str = f"obj_{ann['obj_id']}"
-                            if pid_str in mapping:
-                                ann["obj_id"] = int(mapping[pid_str].split("_")[1])
-                                
-                    new_crops_saved = set()
-                    for obj_id in data["crops_saved"]:
-                        pid_str = f"obj_{obj_id}"
-                        if pid_str in mapping:
-                            new_obj_id = int(mapping[pid_str].split("_")[1])
-                            old_crop = f"/tmp/penguin_crop_{obj_id}.jpg"
-                            new_crop = f"/tmp/penguin_crop_{new_obj_id}.jpg"
-                            if os.path.exists(old_crop) and not os.path.exists(new_crop):
-                                os.rename(old_crop, new_crop)
-                            new_crops_saved.add(new_obj_id)
-                        else:
-                            new_crops_saved.add(obj_id)
-                    data["crops_saved"] = list(new_crops_saved)
+            tracks, annotations, crop_ids, previous_boundary, next_obj_id = _stitch_chunk(
+                data, previous_boundary, identity_history, next_obj_id, len(all_text_annotations), fps,
+                max_dist_pixels, chunk_crops, crop_dir,
+            )
+            for pid, samples in tracks.items():
+                all_tracks.setdefault(pid, []).extend(samples)
+            all_text_annotations.extend(annotations)
+            crops_saved.update(crop_ids)
 
-            for pid, t_list in data["tracks"].items():
-                if pid not in all_tracks:
-                    all_tracks[pid] = []
-                for item in t_list:
-                    item["second"] += second_offset
-                    all_tracks[pid].append(item)
-                    
-                obj_id_int = int(pid.split("_")[1])
-                if obj_id_int >= next_obj_id:
-                    next_obj_id = obj_id_int + 1
-                    
-            all_text_annotations.extend(data["text_annotations"])
-            crops_saved.update(data["crops_saved"])
-            
-            prev_points = {}
-            global_trajectories = {}
-            
-            if len(all_tracks) > 0:
-                max_second_prev = -1
-                for pid, t_list in all_tracks.items():
-                    if len(t_list) > 0:
-                        max_second_prev = max(max_second_prev, t_list[-1]["second"])
-                
-                for pid, t_list in all_tracks.items():
-                    if len(t_list) > 0 and t_list[-1]["second"] >= max_second_prev - 2:
-                        prev_points[pid] = (t_list[-1]["x"], t_list[-1]["y"])
-                        
-                for pid, t_list in all_tracks.items():
-                    traj = [(pt["x"], pt["y"]) for pt in t_list[-15:]]
-                    global_trajectories[pid] = traj
-
+        all_tracks = recompute_velocities(all_tracks)
         print("Phase 3: Semantic Identification (SigLIP Batch Processing)...")
         semantic_id_map = {}
         species_counters = {}
@@ -184,8 +303,9 @@ def extract_tracks(video_path, output_json="tracks.json", output_video="annotate
         next_compact_id = 1
         
         crop_batch = []
-        for obj_id in crops_saved:
-            crop_path = f"/tmp/penguin_crop_{obj_id}.jpg"
+        for obj_id in sorted(crops_saved):
+            crop_path = os.path.join(crop_dir, f"penguin_crop_{obj_id}.jpg")
+            require_nonempty_file(crop_path, f"Classification crop for object {obj_id}")
             crop_batch.append((crop_path, obj_id))
             
         if crop_batch:
@@ -234,10 +354,10 @@ def extract_tracks(video_path, output_json="tracks.json", output_video="annotate
             except Exception:
                 final_tracks[temp_pid] = data_list
         
-        with open(output_json, 'w') as f:
-            json.dump(final_tracks, f, indent=4)
+        validate_tracks(final_tracks)
+        with open(output_json, 'w', encoding='utf-8') as f:
+            json.dump(final_tracks, f, indent=4, allow_nan=False)
             
-        print(f"Tracking complete. Data saved to {output_json} and {output_video}.")
         return output_json, output_video
 
     finally:

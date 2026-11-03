@@ -1,31 +1,64 @@
-from tools.tracking_config import MAX_DIST_REL_WIDTH
+def _run_sam3_subprocess(video_path, temp_video, temp_data, next_obj_id=0, prev_points=None, prev_trajectories=None, crop_dir=None, sam3_config_path=None):
+    """Return chunk-local SAM IDs; legacy global-ID arguments are ignored.
 
-def _run_sam3_subprocess(video_path, temp_video, temp_data, next_obj_id=0, prev_points=None, prev_trajectories=None):
+    Global identity and velocities are owned by the parent after chunk stitching.
+    """
+    from contextlib import ExitStack
+    import json
+    from pathlib import Path
+    import tempfile
+    from tools.tracking_results import TrackingError
+    del next_obj_id, prev_points, prev_trajectories
+
+    try:
+        if crop_dir is None:
+            # Direct legacy callers receive this directory in the result and own cleanup.
+            crop_dir = tempfile.mkdtemp(prefix="penguin-crops-", dir=Path(temp_data).resolve().parent)
+        Path(crop_dir).mkdir(parents=True, exist_ok=True)
+        with ExitStack() as resources:
+            _run_sam3_impl(video_path, temp_video, temp_data, str(crop_dir), resources, sam3_config_path)
+    except Exception as exc:
+        detail = f"SAM 3 tracking failed: {type(exc).__name__}: {exc}"
+        try:
+            Path(temp_data).write_text(json.dumps({"status": "error", "error": detail}), encoding="utf-8")
+        except OSError:
+            pass
+        if isinstance(exc, TrackingError):
+            raise
+        raise TrackingError(detail) from exc
+
+
+def _run_sam3_impl(video_path, temp_video, temp_data, crop_dir, resources, sam3_config_path=None):
     import os
+    import sys
+    from tools.sam3_runtime import resolve_sam3_runtime
+    from tools.tracking_results import TrackingError
+
+    runtime = resolve_sam3_runtime() if sam3_config_path is None else resolve_sam3_runtime(sam3_config_path)
+    from tools.tracking_utils import require_nonempty_file, validate_video
+    sam3_dir = str(runtime.source_root)
+    if sam3_dir not in sys.path:
+        sys.path.insert(0, sam3_dir)
+
     os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
     import torch
-    import gc
+    from collections import deque
     import numpy as np
     import cv2
     import json
     
     print(f"Analyzing {video_path} with SAM 3 ...")
     
-    import sys
-    sam3_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "sam3"))
-    if sam3_dir not in sys.path:
-        sys.path.insert(0, sam3_dir)
-        
     from sam3.model_builder import build_sam3_video_predictor
-    bpe_path = os.path.join(sam3_dir, "sam3", "assets", "bpe_simple_vocab_16e6.txt.gz")
 
+    fps, width, height = validate_video(video_path, "SAM 3 input")
     cap = cv2.VideoCapture(video_path)
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps <= 0: fps = 30
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    
-    max_dist_pixels = width * MAX_DIST_REL_WIDTH
+    resources.callback(cap.release)
+    if not cap.isOpened():
+        raise TrackingError(f"Cannot open SAM 3 input {video_path}.")
+    expected_frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if expected_frame_count <= 0:
+        raise TrackingError("SAM 3 input has no reliable frame count.")
     
     frames = []
     print("Loading video frames into RAM for large video support...")
@@ -36,9 +69,15 @@ def _run_sam3_subprocess(video_path, temp_video, temp_data, next_obj_id=0, prev_
         frames.append(frame)
         frame_idx += 1
     cap.release()
+    if not frames:
+        raise TrackingError("SAM 3 input has no decoded frames.")
+    if len(frames) != expected_frame_count:
+        raise TrackingError(f"SAM 3 decoded {len(frames)} input frames; expected {expected_frame_count}.")
 
-    predictor = build_sam3_video_predictor(bpe_path=bpe_path, async_loading_frames=False)
-    torch.autocast("cuda", dtype=torch.bfloat16).__enter__()
+    predictor = build_sam3_video_predictor(**runtime.builder_kwargs())
+    if hasattr(predictor, "shutdown"):
+        resources.callback(predictor.shutdown)
+    resources.enter_context(torch.autocast("cuda", dtype=torch.bfloat16))
 
     response = predictor.handle_request(request=dict(
         type="start_session", 
@@ -52,100 +91,67 @@ def _run_sam3_subprocess(video_path, temp_video, temp_data, next_obj_id=0, prev_
     
     fourcc_temp = cv2.VideoWriter_fourcc(*'mp4v')
     out_temp = cv2.VideoWriter(temp_video, fourcc_temp, fps, (width, height))
+    resources.callback(out_temp.release)
+    if not out_temp.isOpened():
+        raise TrackingError(f"Cannot open SAM 3 video writer at {temp_video}.")
     
     tracks = {}
     trajectory_history = {}
     
     frame_idx = 0
-    active_penguins = {}
     colors = [(255,0,0), (0,255,0), (0,0,255), (255,255,0), (255,0,255), (0,255,255), (255,165,0)]
     
     text_annotations = []
     crops_saved = set()
     
-    local_mapping = {}
-    if prev_points is None: prev_points = {}
-    if prev_trajectories is None: prev_trajectories = {}
-    
     print("Phase 1: Tracking and Mask Generation (SAM 3)...")
     with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
         for response in predictor.handle_stream_request(request=dict(type="propagate_in_video", session_id=session_id)):
+            if frame_idx >= len(frames) or response.get("frame_index") != frame_idx:
+                raise TrackingError("SAM 3 returned unexpected or out-of-order video frames.")
             out = response["outputs"]
             obj_ids = out.get('out_obj_ids', [])
             masks = out.get('out_binary_masks', [])
+            if len(obj_ids) != len(masks):
+                raise TrackingError("SAM 3 returned different object-ID and mask counts.")
+            frame_ids = [int(raw_id) for raw_id in obj_ids]
+            if len(frame_ids) != len(set(frame_ids)) or any(raw_id < 0 for raw_id in frame_ids):
+                raise TrackingError("SAM 3 returned duplicate or invalid local IDs in a frame.")
             
             frame = frames[frame_idx]
             overlay = frame.copy()
-            current_frame_penguins = {}
             frame_annotations = []
-            
-            if frame_idx == 0 and prev_points:
-                curr_points = {}
-                for idx, raw_obj_id in enumerate(obj_ids):
-                    mask = masks[idx]
-                    if torch.is_tensor(mask): mask = mask.cpu().numpy()
-                    y_coords, x_coords = np.where(mask)
-                    if len(y_coords) > 0:
-                        curr_points[int(raw_obj_id)] = (int(np.mean(x_coords)), int(np.mean(y_coords)))
-                
-                if curr_points:
-                    from scipy.optimize import linear_sum_assignment
-                    prev_pids = list(prev_points.keys())
-                    curr_raw_ids = list(curr_points.keys())
-                    
-                    cost_matrix = np.zeros((len(prev_pids), len(curr_raw_ids)))
-                    for r, pp_id in enumerate(prev_pids):
-                        px, py = prev_points[pp_id]
-                        for c, c_raw_id in enumerate(curr_raw_ids):
-                            cx, cy = curr_points[c_raw_id]
-                            cost_matrix[r, c] = np.hypot(px - cx, py - cy)
-                            
-                    row_ind, col_ind = linear_sum_assignment(cost_matrix)
-                    
-                    for r, c in zip(row_ind, col_ind):
-                        if cost_matrix[r, c] < max_dist_pixels:
-                            local_mapping[curr_raw_ids[c]] = int(prev_pids[r].split('_')[1])
-                            
+
             for idx, raw_obj_id in enumerate(obj_ids):
-                raw_id = int(raw_obj_id)
-                if raw_id in local_mapping:
-                    obj_id = local_mapping[raw_id]
-                else:
-                    obj_id = next_obj_id
-                    local_mapping[raw_id] = obj_id
-                    next_obj_id += 1
+                obj_id = int(raw_obj_id)
                     
                 mask = masks[idx]
                 if torch.is_tensor(mask):
                     mask = mask.cpu().numpy()
                 mask = mask.astype(bool)
+                y_coords, x_coords = np.where(mask)
+                if len(y_coords) == 0:
+                    continue
                 
                 if int(obj_id) not in crops_saved:
-                    y_coords, x_coords = np.where(mask)
-                    if len(y_coords) > 0:
-                        y1, y2 = max(0, min(y_coords)-15), min(frame.shape[0], max(y_coords)+15)
-                        x1, x2 = max(0, min(x_coords)-15), min(frame.shape[1], max(x_coords)+15)
-                        crop = frame[y1:y2, x1:x2]
-                        temp_path = f"/tmp/penguin_crop_{obj_id}.jpg"
-                        cv2.imwrite(temp_path, crop)
-                        crops_saved.add(int(obj_id))
+                    y1, y2 = max(0, min(y_coords)-15), min(frame.shape[0], max(y_coords)+15)
+                    x1, x2 = max(0, min(x_coords)-15), min(frame.shape[1], max(x_coords)+15)
+                    crop = frame[y1:y2, x1:x2]
+                    temp_path = os.path.join(crop_dir, f"penguin_crop_{obj_id}.jpg")
+                    if not os.path.exists(temp_path) and not cv2.imwrite(temp_path, crop):
+                        raise TrackingError(f"Could not save classification crop {temp_path}.")
+                    require_nonempty_file(temp_path, "Classification crop")
+                    crops_saved.add(int(obj_id))
                 
                 pid = f"obj_{obj_id}"
                     
-                y_coords, x_coords = np.where(mask)
-                if len(y_coords) == 0: continue
                 cx = int(np.mean(x_coords))
                 cy = int(np.mean(y_coords))
                 area = len(y_coords)
                 
-                if pid not in trajectory_history:
-                    if pid in prev_trajectories:
-                        trajectory_history[pid] = list(prev_trajectories[pid])
-                    else:
-                        trajectory_history[pid] = []
-                
-                current_frame_penguins[pid] = (cx, cy)
-                trajectory_history[pid].append((cx, cy))
+                # Telemetry keeps every observation; the visual trail has bounded
+                # drawing cost even when the proxy FPS/chunk duration is increased.
+                trajectory_history.setdefault(pid, deque(maxlen=30)).append((cx, cy))
                 
                 color = colors[int(obj_id) % len(colors)]
                 overlay[mask] = color
@@ -161,46 +167,37 @@ def _run_sam3_subprocess(video_path, temp_video, temp_data, next_obj_id=0, prev_
                     "cy": cy
                 })
                 
-                if frame_idx % int(fps) == 0:
-                    second = frame_idx // int(fps)
-                    vx, vy = 0, 0
-                    if pid in active_penguins:
-                        vx = cx - active_penguins[pid][0]
-                        vy = cy - active_penguins[pid][1]
-                        
-                    if pid not in tracks:
-                        tracks[pid] = []
-                        
-                    tracks[pid].append({
-                        "second": second,
-                        "x": cx,
-                        "y": cy,
-                        "area": float(area),
-                        "vx": float(vx),
-                        "vy": float(vy)
-                    })
+                # Keep each proxy-frame observation, including a new animal's first
+                # subsecond appearance. The parent computes dx/dt after stitching.
+                tracks.setdefault(pid, []).append({
+                    "second": frame_idx / fps,
+                    "x": cx,
+                    "y": cy,
+                    "area": float(area),
+                    "vx": 0.0,
+                    "vy": 0.0,
+                })
             
             text_annotations.append(frame_annotations)
-            active_penguins = current_frame_penguins
             frame = cv2.addWeighted(overlay, 0.4, frame, 0.6, 0)
             out_temp.write(frame)
             frame_idx += 1
             
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
         
     out_temp.release()
-    del predictor
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    if frame_idx != len(frames):
+        raise TrackingError(f"SAM 3 returned {frame_idx} frames for {len(frames)} input frames.")
+    validate_video(temp_video, "SAM 3 worker video", expected_frames=len(frames))
+    # ExitStack shuts down the predictor and the process releases its CUDA state.
+    # Per-frame empty_cache() would synchronize CUDA and defeat allocator reuse.
         
-    with open(temp_data, 'w') as f:
+    with open(temp_data, 'w', encoding='utf-8') as f:
         json.dump({
+            "status": "ok",
             "tracks": tracks,
             "text_annotations": text_annotations,
-            "crops_saved": list(crops_saved)
+            "crops_saved": list(crops_saved),
+            "crop_dir": crop_dir,
         }, f)
         
     print("Phase 2: SAM 3 process completed.")

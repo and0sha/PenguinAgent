@@ -1,25 +1,18 @@
-streamlit>=1.33.0
-torch
-torchvision
-torchaudio
-ollama>=0.2.0
-langchain>=0.1.16
-langchain-community>=0.0.32
-langchain-huggingface>=0.0.1
-faiss-cpu>=1.8.0
-pypdf>=4.2.0
-opencv-python>=4.9.0.80
-numpy
-pandas
-matplotlib
-supervision>=0.20.0
-python-dotenv
-sentence-transformers
-st-keyup
-scikit-learn
-joblib
-Pillow
-scipy
-tqdm
-transformers
-requests
+# Linux / Python 3.12. Install the CUDA wheels with scripts/setup_sam3_wsl.sh
+# first; this shared seed keeps the app and smoke runtime compatible with SAM3.
+-r requirements-sam3-smoke.txt
+streamlit>=1.33,<2
+ollama>=0.6,<1
+langchain-core>=1.0,<2
+langchain-community>=0.4,<0.5
+langchain-huggingface>=1.0,<2
+langchain-text-splitters>=1.0,<2
+faiss-cpu>=1.8,<2
+pypdf>=5,<7
+pandas>=2.2,<3
+matplotlib>=3.8,<4
+python-dotenv>=1.0,<2
+sentence-transformers>=5,<6
+st-keyup>=0.2,<1
+tqdm>=4.66,<5
+requests>=2.32,<3

@@ -1,92 +1,100 @@
-import os
-import torch
 import ollama
-import gc
-try:
-    from langchain_community.document_loaders import PyPDFDirectoryLoader
-    from langchain_huggingface import HuggingFaceEmbeddings
-    from langchain_community.vectorstores import FAISS
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
-except ImportError:
-    pass
+import os
+from pathlib import Path
+import subprocess
+import sys
+from build_rag_index import (
+    PROJECT_ROOT, RAGIndexError, corpus_snapshot, create_embeddings, index_generation,
+    load_rag_index, resolve_rag_directory,
+)
 
 class RAGMixin:
-    def initialize_rag(self):
-        print("Initializing Local RAG Database...")
-        if not os.path.exists(self.rag_dir):
-            print(f"RAG directory {self.rag_dir} not found.")
-            return
+    @property
+    def rag_dir(self):
+        return self._rag_dir
 
+    @rag_dir.setter
+    def rag_dir(self, value):
         try:
-           
-            import subprocess
-            import sys
-            
-            
+            directory = str(resolve_rag_directory(value))
+        except (OSError, ValueError, RAGIndexError):
+            self.invalidate_rag()
+            raise
+        if directory != getattr(self, "_rag_dir", None):
+            self.invalidate_rag()
+        self._rag_dir = directory
+
+    def invalidate_rag(self):
+        self.vector_store = None
+        self.embeddings = None
+        self.current_rag_refs = {}
+        self.rag_ref_counter = 1
+
+    def initialize_rag(self):
+        """Publish a queryable index only after the isolated builder and safe loader succeed."""
+        self.invalidate_rag()
+        try:
+            directory = resolve_rag_directory(self.rag_dir)
+            if not directory.is_dir():
+                raise RAGIndexError(f"Scientific PDF directory does not exist: {directory}")
             result = subprocess.run(
-                [sys.executable, "build_rag_index.py", "--dir", self.rag_dir],
-                capture_output=True,
-                text=True
+                [sys.executable, "-B", str(PROJECT_ROOT / "build_rag_index.py"), "--dir", str(directory)],
+                cwd=str(PROJECT_ROOT), capture_output=True, text=True, encoding="utf-8", errors="replace",
+                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
             )
-            
             if result.stdout:
                 print(result.stdout)
             if result.stderr:
                 print(result.stderr, file=sys.stderr)
-                
             if result.returncode != 0:
-                print("Error: Isolated RAG indexing failed. Check logs above.")
-                return
-
-            index_path = os.path.join(self.rag_dir, "faiss_index")
-            if os.path.exists(index_path):
-               
-                self.embeddings = HuggingFaceEmbeddings(
-                    model_name="BAAI/bge-m3", 
-                    model_kwargs={'device': 'cuda' if torch.cuda.is_available() else 'cpu'},
-                    encode_kwargs={'normalize_embeddings': True}
-                )
-                self.vector_store = FAISS.load_local(index_path, self.embeddings, allow_dangerous_deserialization=True)
-                print("RAG successfully loaded into main process for querying.")
-                
-                import gc
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            else:
-                print("Error: Index path not found after successful subprocess run.")
-                
-        except Exception as e:
-            print(f"Error initializing RAG: {e}")
+                detail = (result.stderr or result.stdout or "No diagnostic output.").strip()[-4000:]
+                raise RAGIndexError(f"Scientific RAG builder failed (exit {result.returncode}): {detail}")
+            index_generation(directory, corpus_snapshot(directory)[1])
+            embeddings = create_embeddings()
+            store = load_rag_index(directory, embeddings)
+            self.embeddings, self.vector_store = embeddings, store
+            return True
+        except Exception as exc:
+            self.invalidate_rag()
+            raise RAGIndexError(f"Cannot initialize scientific RAG: {exc}") from exc
 
     def ask(self, query, output_dir=None):
-        import glob
-        # Gather Context from Local Reports (Priority)
+        # Video reports are scoped explicitly by the caller to a validated run.
+        # A literature-only question must never sweep reports from other videos.
         local_context = ""
         report_files = []
-        if output_dir and os.path.exists(output_dir):
-            report_files.extend(glob.glob(os.path.join(output_dir, "*.md")))
-        else:
-            report_files.extend(glob.glob(os.path.join(self.videos_dir, "**/*.md"), recursive=True))
+        if output_dir and Path(output_dir).is_dir():
+            report_files = [Path(output_dir) / name for name in (
+                "final_scientific_report.md", "final_huddle_report.md",
+            )]
             
-        for filepath in set(report_files):
-            if "final_scientific_report" in filepath:
+        for filepath in report_files:
+            if filepath.is_file():
                 try:
+                    if filepath.is_symlink() or filepath.resolve().parent != Path(output_dir).resolve():
+                        raise RAGIndexError(f"Current video report points outside its run directory: {filepath.name}")
                     with open(filepath, "r", encoding="utf-8") as f:
-                        local_context += f"\n--- Report Context from {filepath} ---\n{f.read()}\n"
-                except: pass
+                        contents = f.read(4501)
+                    excerpt = contents[:4500]
+                    if len(contents) > 4500:
+                        excerpt += "\n[Report excerpt truncated]"
+                    local_context += f"\n--- Report Context from {filepath.name} ---\n{excerpt}\n"
+                except (OSError, UnicodeError) as exc:
+                    raise RAGIndexError(f"Cannot read current video report {filepath.name}: {exc}") from exc
                 
 
         rag_context = ""
-        if self.vector_store:
+        if self.vector_store is not None:
             try:
                 # Use MMR for more diverse interactive context
                 docs = self.vector_store.max_marginal_relevance_search(query, k=3, fetch_k=10, lambda_mult=0.7)
                 rag_context = "\n".join([d.page_content for d in docs])
-            except Exception as e:
-                print(f"Error searching RAG: {e}")
+            except Exception as exc:
+                raise RAGIndexError(f"Cannot search the scientific index: {exc}") from exc
                 
-        sys_prompt = "<|think|>You are PenguinAgent, an expert ornithologist. Answer the user's question using the provided contexts."
+        sys_prompt = ("You are PenguinAgent, an expert ornithologist. Answer using the provided contexts. "
+                      "Distinguish observations, scientific literature and hypotheses. Video reports are prior interpretations, "
+                      "not independent measurements. State when the supplied evidence is insufficient.")
         
         combined_context = ""
         if local_context:
@@ -102,11 +110,9 @@ class RAGMixin:
                 {'role': 'system', 'content': sys_prompt},
                 {'role': 'user', 'content': query}
             ], options={"num_ctx": 16384}, keep_alive=0)
-            import gc
-            import torch
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            return response['message']['content']
-        except Exception as e:
-            return f"Error communicating with Ollama: {e}"
+            answer = response['message']['content']
+            if not isinstance(answer, str) or not answer.strip():
+                raise ValueError("Ollama returned an empty answer")
+            return answer
+        except Exception as exc:
+            raise RuntimeError(f"Cannot communicate with Ollama: {exc}") from exc

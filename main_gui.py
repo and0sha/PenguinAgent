@@ -20,12 +20,19 @@ try:
 except ImportError:
     pass
 logging.getLogger("transformers").setLevel(logging.ERROR)
-from st_keyup import st_keyup
 import os
-import cv2
 import json
+import html
+from pathlib import Path
 from behave_ai import BehaviorAgent
 from interactive_mode import handle_interactive_query
+from tools.gui_tracking_state import (
+    begin_tracking_attempt, current_tracking_result, report_for_result,
+    reset_session_analysis_state, save_uploaded_video, store_report_for_result,
+    sync_tracking_context,
+)
+
+st.set_page_config(page_title="PenguinAgent", layout="wide", page_icon="🐧")
 
 # Initialize Agent
 if "agent" not in st.session_state:
@@ -35,14 +42,11 @@ if "agent" not in st.session_state:
 @st.cache_data(ttl=60)
 def get_ollama_models():
     try:
-        r = urllib.request.urlopen("http://localhost:11434/api/tags", timeout=2)
-        models_data = json.loads(r.read())["models"]
-        # Only list gemma models for this hackathon
-        return [m["name"] for m in models_data if "gemma" in m["name"].lower()]
+        with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=2) as response:
+            models_data = json.loads(response.read())["models"]
+        return [model["name"] for model in models_data if isinstance(model.get("name"), str)]
     except Exception:
-        return ["gemma4:26b"] 
-
-st.set_page_config(page_title="PenguinAgent", layout="wide", page_icon="🐧")
+        return []
 
 st.markdown("""
 <style>
@@ -147,12 +151,13 @@ st.title("🐧 PenguinAgent: AI Antarctic Researcher")
 with st.sidebar:
     st.header("Control Panel")
     
-    # Gemma 4 Model Selection via Ollama
+    # Keep the configured model selected while allowing any locally installed model.
     gemma_models = get_ollama_models()
-    if not gemma_models:
-        gemma_models = ["gemma4:26b"]
+    configured_model = st.session_state.agent.model
+    if configured_model not in gemma_models:
+        gemma_models.insert(0, configured_model)
 
-    selected_model = st.selectbox("Select Gemma 4 Model (via Ollama)", gemma_models)
+    selected_model = st.selectbox("Select Model (via Ollama)", gemma_models, index=gemma_models.index(configured_model))
     st.session_state.agent.model = selected_model
 
     st.markdown("---")
@@ -163,24 +168,44 @@ with st.sidebar:
 
     rag_dir_input = st.text_input("Documents Folder", value=st.session_state.rag_dir, help="Specify the local path to the folder containing your scientific PDFs.")
     st.session_state.rag_dir = rag_dir_input
-    st.session_state.agent.rag_dir = rag_dir_input
+    rag_directory_valid = True
+    try:
+        st.session_state.agent.rag_dir = rag_dir_input
+    except (OSError, ValueError, RuntimeError) as exc:
+        rag_directory_valid = False
+        st.error(f"Invalid scientific PDF directory: {exc}")
 
     if st.button("Initialize Local RAG"):
-        with st.spinner(f"Indexing PDFs from {st.session_state.rag_dir}..."):
-            st.session_state.agent.initialize_rag()
-            st.success("RAG Initialized!")            
+        if rag_directory_valid:
+            with st.spinner(f"Indexing PDFs from {st.session_state.rag_dir}..."):
+                try:
+                    if st.session_state.agent.initialize_rag() is not True:
+                        raise RuntimeError("The scientific index was not initialized.")
+                    st.success("RAG Initialized!")
+                except Exception as exc:
+                    st.error(f"Cannot initialize scientific RAG: {exc}")
     # Video Upload (Single Source of Truth)
     st.subheader("1. Upload Video")
     uploaded_file = st.file_uploader("Upload Video File", type=["mp4", "avi", "mov"])
     
     if uploaded_file is not None:
-        video_save_path = os.path.join(st.session_state.agent.videos_dir, uploaded_file.name)
-        # Avoid rewriting if it's the exact same file to save time, but overwrite if needed
-        with open(video_save_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        st.session_state.current_video = uploaded_file.name
-        st.success(f"Loaded: {uploaded_file.name}")
+        try:
+            upload = save_uploaded_video(
+                uploaded_file.name, uploaded_file.getbuffer(), st.session_state.agent.videos_dir,
+            )
+            if upload.changed or st.session_state.get("current_video") != upload.filename:
+                reset_session_analysis_state(st.session_state)
+            st.session_state.current_video = upload.filename
+            st.caption(f"Loaded: {upload.filename}")
+        except Exception as exc:
+            st.session_state.pop("current_video", None)
+            begin_tracking_attempt(st.session_state, st.session_state.agent)
+            st.error(f"Cannot save uploaded video: {exc}")
     else:
+        if st.session_state.pop("current_video", None) is not None:
+            begin_tracking_attempt(st.session_state, st.session_state.agent)
+        else:
+            st.session_state.agent.invalidate_tracking_state()
         st.info("Please upload a video to begin analysis.")
         
     st.subheader("2. Analyze Video")
@@ -192,9 +217,22 @@ with st.sidebar:
 
     output_dir = st.text_input("Output Directory", value=default_out, help="Where to save the JSON tracks, annotated video, and report.")
     st.session_state.output_dir = output_dir if output_dir else default_out
+
+    current_video = st.session_state.get("current_video")
+    if current_video:
+        try:
+            sync_tracking_context(
+                st.session_state, st.session_state.agent, current_video, st.session_state.output_dir,
+            )
+        except Exception as exc:
+            begin_tracking_attempt(st.session_state, st.session_state.agent)
+            st.error(f"Cannot select this video analysis: {exc}")
+    active_result = current_tracking_result(
+        st.session_state, st.session_state.agent, current_video, st.session_state.output_dir,
+    )
     
     compact_annotation = st.checkbox(
-        "Сompact annotation", 
+        "Compact annotation",
         value=True, 
         help="Instead of cumbersome species names, use the '1_1', '2_1' format in videos. The correspondence map will be saved in a text file tracks_species_mapping.txt."
     )
@@ -203,16 +241,27 @@ with st.sidebar:
         if "current_video" not in st.session_state:
             st.error("Upload a video first!")
         else:
+            previous_run_id = active_result.run_id if active_result else None
+            begin_tracking_attempt(st.session_state, st.session_state.agent)
+            active_result = None
             with st.spinner(f"Extracting sub-pixel masks & tracks for {st.session_state.current_video}..."):
                 try:
-                    tracks, annotated_video = st.session_state.agent.run_tracking(
+                    st.session_state.agent.run_tracking(
                         st.session_state.current_video, 
                         output_dir=st.session_state.output_dir,
                         compact_annotation=compact_annotation
                     )
-                    st.session_state.annotated_video = annotated_video
+                    active_result = current_tracking_result(
+                        st.session_state, st.session_state.agent,
+                        st.session_state.current_video, st.session_state.output_dir,
+                    )
+                    if active_result is None or active_result.run_id == previous_run_id:
+                        raise RuntimeError("Tracking did not produce a new validated result.")
+                    st.session_state.annotated_video = str(active_result.annotated_video_path)
                     st.success("Tracks and annotated video successfully generated!")
                 except Exception as e:
+                    active_result = None
+                    begin_tracking_attempt(st.session_state, st.session_state.agent)
                     st.error(f"Error during tracking: {e}")
                 
     st.divider()
@@ -231,32 +280,41 @@ with st.sidebar:
     anomaly_params = {}
     if report_type == "Search for anomalies":
         st.markdown("**Anomaly Index Coefficients:**")
+        st.caption("These user-selected weights define an illustrative index; they are not calibrated anomaly probabilities or validated biological scores.")
         c1, c2, c3 = st.columns(3)
         with c1:
-            anomaly_params['w_u'] = st.number_input("Uniqueness (w_u)", value=0.5, step=0.1, format="%.2f")
+            anomaly_params['w_u'] = st.number_input("Uniqueness (w_u)", value=0.5, min_value=0.0, step=0.1, format="%.2f")
         with c2:
-            anomaly_params['w_a'] = st.number_input("Anormality (w_a)", value=0.3, step=0.1, format="%.2f")
+            anomaly_params['w_a'] = st.number_input("Anormality (w_a)", value=0.3, min_value=0.0, step=0.1, format="%.2f")
         with c3:
-            anomaly_params['w_r'] = st.number_input("Rarity (w_r)", value=0.2, step=0.1, format="%.2f")
+            anomaly_params['w_r'] = st.number_input("Rarity (w_r)", value=0.2, min_value=0.0, step=0.1, format="%.2f")
 
     # Context parameters for Huddling analysis
     huddle_params = {}
     if report_type == "Huddling Analysis":
-        st.markdown("**Thermodynamic model parameters (Waters 2012):**")
-        huddle_params['pe'] = st.number_input("Wind force (Peclet number, Pe)", value=100.0, step=10.0, help="The ratio of convective to diffusive transfer. A realistic value is ~100.")
-        huddle_params['beta'] = st.number_input("Noise/uncertainty level (β)", value=0.25, step=0.05, format="%.2f", help="How wrong are penguins? A realistic value is ~0.25.")
-        c1, c2 = st.columns(2)
-        with c1:
-            huddle_params['tp'] = st.number_input("Temperature at the edge of the crowd (Tp) °C", value=-10.0, step=1.0)
-        with c2:
-            huddle_params['t_inf'] = st.number_input("Temperature away (T∞) °C", value=-40.0, step=1.0)
+        st.caption("The viewer replays tracked observations. Temperature, wind and heat loss are not measured from this video.")
+        if st.checkbox("Include optional thermodynamic assumptions", value=False,
+                       help="Include explicitly chosen model inputs in the report; these are not video measurements."):
+            st.markdown("**User-supplied model assumptions:**")
+            huddle_params['pe'] = st.number_input("Assumed Peclet number (Pe)", value=100.0, min_value=0.0, step=10.0,
+                                                  help="Dimensionless model input; no wind measurement is inferred.")
+            huddle_params['beta'] = st.number_input("Assumed model noise (β)", value=0.25, min_value=0.0, step=0.05, format="%.2f")
+            c1, c2 = st.columns(2)
+            with c1:
+                huddle_params['tp'] = st.number_input("Assumed crowd-edge temperature (Tp) °C", value=-10.0, step=1.0)
+            with c2:
+                huddle_params['t_inf'] = st.number_input("Assumed ambient temperature (T∞) °C", value=-40.0, step=1.0)
 
     if st.button("Generate Scientific Report", type="primary"):
-        if "current_video" not in st.session_state:
-             st.error("First, upload and process your video!")
-        elif getattr(st.session_state.agent, 'tracks', None) is None:
-             st.error("No tracking data! Run the analysis first.")
+        active_result = current_tracking_result(
+            st.session_state, st.session_state.agent,
+            st.session_state.get("current_video"), st.session_state.output_dir,
+        )
+        if active_result is None:
+             st.error("No validated analysis for this video and output directory. Run tracking first.")
         else:
+             st.session_state.pop("report", None)
+             st.session_state.pop("report_run_id", None)
              with st.spinner(f"The agent writes a report: {report_type}..."):
                  try:
                      if report_type == "Search for anomalies":
@@ -272,11 +330,22 @@ with st.sidebar:
                              **huddle_params
                          )
                      
-                     st.session_state.report = paper
+                     validated_result = current_tracking_result(
+                         st.session_state, st.session_state.agent,
+                         st.session_state.current_video, st.session_state.output_dir,
+                     )
+                     if validated_result is None or validated_result.run_id != active_result.run_id:
+                         active_result = validated_result
+                         raise RuntimeError("The tracking result changed while generating the report.")
+                     store_report_for_result(st.session_state, paper, active_result, st.session_state.agent.current_rag_refs)
                      st.success("The report has been successfully generated! View the results below.")
                  except Exception as e:
                      st.error(f"Error generating report: {e}")
 
+active_result = current_tracking_result(
+    st.session_state, st.session_state.agent,
+    st.session_state.get("current_video"), st.session_state.output_dir,
+)
 col1, col2 = st.columns([2, 1])
 
 with col1:
@@ -284,37 +353,30 @@ with col1:
     if "current_video" in st.session_state:
         video_path = os.path.join(st.session_state.agent.videos_dir, st.session_state.current_video)
         
-        out_dir = st.session_state.get("output_dir", os.path.join(st.session_state.agent.videos_dir, os.path.splitext(st.session_state.current_video)[0] + "_output"))
-        annotated_path = os.path.join(out_dir, "annotated.mp4")
-        json_path = os.path.join(out_dir, "tracks.json")
-        
-        if os.path.exists(annotated_path):
-            st.video(annotated_path, format="video/mp4")
+        if active_result is not None:
+            st.video(str(active_result.annotated_video_path), format="video/mp4")
             st.caption("Explicitly showing SAM 3 tracking, masks, and trajectories")
-            
-            if os.path.exists(json_path):
-                with open(json_path, 'r') as f:
-                    tracks = json.load(f)
-                st.write("Tracking JSON generated (sample):")
-                st.json({k: tracks[k][:2] for k in list(tracks.keys())[:3]})
+            tracks = active_result.tracks
+            st.write("Tracking JSON generated (sample):")
+            st.json({k: tracks[k][:2] for k in list(tracks.keys())[:3]})
         else:
             st.video(video_path)
             st.caption("Original Video. Click 'Start processing and annotating video' to generate tracks and masks.")
     else:
         st.write("Upload a video in the sidebar to view it here.")
         
-    if "report" in st.session_state:
+    report_text = report_for_result(st.session_state, active_result)
+    if report_text is not None:
         st.subheader("Generated Scientific Report")
-        report_text = st.session_state.report
         
         import re
         def replace_citation(match):
             ref_id = int(match.group(1))
-            if hasattr(st.session_state.agent, 'current_rag_refs') and ref_id in st.session_state.agent.current_rag_refs:
-                ref_data = st.session_state.agent.current_rag_refs[ref_id]
-                source = ref_data['source']
-                # Escape quotes and formatting for HTML insertion
-                text = ref_data['text'].replace('"', '&quot;').replace('\n', '<br/>')
+            report_refs = st.session_state.get("report_rag_refs", {})
+            if ref_id in report_refs:
+                ref_data = report_refs[ref_id]
+                source = html.escape(str(ref_data['source']))
+                text = html.escape(str(ref_data['text'])).replace('\n', '<br/>')
                 return f'<span class="rag-tooltip">[{ref_id}]<span class="rag-tooltiptext"><strong>{source}</strong>{text}</span></span>'
             return match.group(0) # If no ref found, leave it as is.
             
@@ -322,13 +384,18 @@ with col1:
         
         sim_match = re.search(r'The interactive huddle dynamics simulation has been extracted and saved to: `([^`]+)`', processed_report)
         if sim_match:
-            processed_report = processed_report.replace(sim_match.group(0), "_The interactive simulation is rendered below._")
+            processed_report = processed_report.replace(sim_match.group(0), "_The tracked-observation viewer is rendered below._")
             
         st.markdown(processed_report, unsafe_allow_html=True)
         
         if sim_match:
-            sim_path = sim_match.group(1)
-            if os.path.exists(sim_path):
+            sim_path = Path(active_result.output_dir) / "huddle_simulation.html"
+            try:
+                simulation_matches_run = Path(sim_match.group(1)).resolve() == sim_path.resolve()
+            except (OSError, ValueError):
+                simulation_matches_run = False
+            if simulation_matches_run and sim_path.is_file():
+                st.caption("Tracked-observation viewer: positions come from the video analysis; this is not a thermodynamic simulation.")
                 with open(sim_path, 'r', encoding='utf-8') as f:
                     sim_html = f.read()
                 import streamlit.components.v1 as components
@@ -336,6 +403,8 @@ with col1:
 
 with col2:
     st.subheader("Chat")
+    if active_result is None:
+        st.caption("No video analysis context; scientific literature only.")
     
     st.markdown("_Use the '🏷️ Add Tags' button to auto-paste penguin indicators, or manually type @tags._")
     
@@ -344,7 +413,10 @@ with col2:
         
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+            if msg.get("error"):
+                st.error(msg["content"])
+            else:
+                st.markdown(msg["content"])
             
     if "pending_tag" not in st.session_state:
         st.session_state.pending_tag = ""
@@ -357,11 +429,11 @@ with col2:
         st.write("Select a tag to copy it to the clipboard.")
 
         penguin_options = ["None"]
-        if hasattr(st.session_state.agent, 'tracks') and st.session_state.agent.tracks:
-            penguin_options.extend(st.session_state.agent.tracks.keys())
+        if active_result is not None and active_result.tracks:
+            penguin_options.extend(active_result.tracks.keys())
 
         penguin_tag = st.selectbox("Penguins (Species & ID)", penguin_options)
-        if st.button("Add Penguin Tag"):
+        if st.button("Add Penguin Tag", disabled=active_result is None):
             if penguin_tag != "None":
                 st.session_state.pending_tag = f"@{penguin_tag} "
                 st.session_state.last_copied_tag = f"@{penguin_tag} "
@@ -374,9 +446,10 @@ with col2:
         tag_to_insert = st.session_state.pending_tag
         st.session_state.pending_tag = ""  
 
+        tag_json = json.dumps(tag_to_insert.strip()).replace("<", "\\u003c")
         js_code = f"""
         <script>
-        const textToCopy = '{tag_to_insert.strip()}';
+        const textToCopy = {tag_json};
         const parentWindow = window.parent;
         const parentDoc = parentWindow.document;
 
@@ -406,7 +479,12 @@ with col2:
     prompt_typing = st.chat_input("Ask PenguinAgent...")
     
     if prompt_typing:
+        active_result = current_tracking_result(
+            st.session_state, st.session_state.agent,
+            st.session_state.get("current_video"), st.session_state.output_dir,
+        )
         full_prompt = prompt_typing
+        st.session_state.setdefault("messages", [])
             
         st.session_state.messages.append({"role": "user", "content": full_prompt})
         with st.chat_message("user"):
@@ -414,8 +492,17 @@ with col2:
             
         with st.chat_message("assistant"):
             with st.spinner(f"{st.session_state.agent.model} is thinking..."):
-                out_dir = st.session_state.get("output_dir")
-                response = handle_interactive_query(st.session_state.agent, full_prompt, output_dir=out_dir)
-                st.markdown(response)
-                st.session_state.messages.append({"role": "assistant", "content": response})
+                try:
+                    response = handle_interactive_query(
+                        st.session_state.agent, full_prompt,
+                        output_dir=active_result.output_dir if active_result is not None else None,
+                    )
+                    if not isinstance(response, str) or not response.strip():
+                        raise RuntimeError("The assistant returned no answer.")
+                    st.markdown(response)
+                    st.session_state.messages.append({"role": "assistant", "content": response})
+                except Exception as exc:
+                    message = f"Error answering this question: {exc}"
+                    st.error(message)
+                    st.session_state.messages.append({"role": "assistant", "content": message, "error": True})
         st.rerun()
