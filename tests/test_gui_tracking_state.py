@@ -193,7 +193,8 @@ class UploadedVideoTests(unittest.TestCase):
         result = save_uploaded_video("video.mp4", b"other", self.directory)
         self.assertTrue(result.changed)
         self.assertEqual(result.path.read_bytes(), b"other")
-        self.assertEqual(list(self.directory.iterdir()), [result.path])
+        # Windows CI may expose TEMP through an 8.3 alias such as RUNNER~1.
+        self.assertEqual([path.resolve() for path in self.directory.iterdir()], [result.path])
 
     def test_filename_traversal_is_rejected(self):
         for name in ("../video.mp4", "..\\video.mp4", "C:\\video.mp4", "/tmp/video.mp4", ".", "", "video.mp4\0"):
@@ -207,7 +208,7 @@ class UploadedVideoTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 save_uploaded_video("video.mp4", b"other", self.directory)
         self.assertEqual(original.path.read_bytes(), b"first")
-        self.assertEqual(list(self.directory.iterdir()), [original.path])
+        self.assertEqual([path.resolve() for path in self.directory.iterdir()], [original.path])
 
 
 class Session(dict):

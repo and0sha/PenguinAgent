@@ -58,7 +58,8 @@ class TrackingPublicationTests(unittest.TestCase):
         second = self.successful_run()
         self.assertNotEqual(first.run_id, second.run_id)
         self.assertEqual(first_contents, (first.json_path.read_bytes(), first.annotated_video_path.read_bytes()))
-        self.assertEqual(second.output_dir, self.output / "runs" / second.run_id)
+        # Compare canonical paths even when Windows TEMP uses a short-name alias.
+        self.assertEqual(second.output_dir, (self.output / "runs" / second.run_id).resolve())
         self.assertEqual(second.tracks, TRACKS)
         self.assertFalse((self.output / "tracks.json").exists())
         self.assertFalse((self.output / ".tracking.lock").exists())
